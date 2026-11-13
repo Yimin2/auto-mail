@@ -198,11 +198,20 @@ const PAGE_CSS = `
 /* 대시보드 배치 · 값은 모두 디자인 시스템 토큰만 사용 */
 html{-webkit-text-size-adjust:100%}
 body{font-size:16px;line-height:26px}
-.wrap{max-width:960px;margin:0 auto;padding:var(--space-10) var(--space-6) var(--space-16)}
+/* 반응형 규칙: 모바일 좌우 16(space-4) · 태블릿 24 · 데스크톱 32 · 와이드 48, 와이드 최대 1600 */
+.wrap{max-width:1600px;margin:0 auto;padding:var(--space-8) var(--space-8) var(--space-16)}
+@media (min-width:1920px){.wrap{padding-left:var(--space-12);padding-right:var(--space-12)}}
+@media (min-width:768px) and (max-width:1279px){.wrap{padding-left:var(--space-6);padding-right:var(--space-6)}}
+/* 데스크톱 이상: 12열 중 5열(할 일·반복 메일) + 7열(받은 메일) */
+@media (min-width:1280px){
+  #main{display:grid;grid-template-columns:minmax(0,5fr) minmax(0,7fr);gap:var(--space-8);align-items:start}
+  #main>.col>.sec:first-child{margin-top:0}
+}
 .top{display:flex;align-items:center;justify-content:space-between;gap:var(--space-4);flex-wrap:wrap;margin-bottom:var(--space-6)}
 .top h1{margin:0;font-size:28px;line-height:36px;font-weight:700;letter-spacing:-0.01em;text-wrap:balance}
 .top .hint{margin:0}
 .stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:var(--space-4);margin-bottom:var(--space-6)}
+@media (min-width:768px) and (max-width:1279px){.stats{grid-template-columns:repeat(2,minmax(0,1fr))}}
 .stats .card{padding:var(--space-5) var(--space-6);gap:var(--space-1)}
 .stats .value{font-size:28px;line-height:36px;font-weight:800;font-variant-numeric:tabular-nums}
 .stats .label{display:flex;align-items:center;gap:var(--space-2);font-size:14px;line-height:22px;font-weight:500;color:var(--text-muted)}
@@ -220,20 +229,24 @@ body{font-size:16px;line-height:26px}
 .task .what{font-weight:700}
 .task .src{font-size:14px;line-height:22px;color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .task .src a{color:inherit;text-underline-offset:3px}
-.task .src a:hover{color:var(--primary-text)}
+@media (hover:hover){.task .src a:hover{color:var(--primary-text)}.srcinfo:hover{color:var(--text)}}
 .list{overflow:visible}
-.srcinfo{position:relative;display:inline-flex;align-items:center;gap:var(--space-1);align-self:flex-start;margin-top:var(--space-1);padding:0 var(--space-2);height:28px;border-radius:var(--radius-sm);background:var(--surface-subtle);color:var(--text-muted);font-size:14px;line-height:22px;font-weight:500;cursor:help;max-width:100%}
+/* 근거 칩: Badge 재질(surface · border · radius-full) + 아이콘, 마우스를 올리면 Tooltip */
+.srcinfo{position:relative;align-self:flex-start;margin-top:var(--space-1);max-width:100%;font-weight:500;color:var(--text-muted);cursor:help}
 .srcinfo .srclabel{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.srcinfo.none{cursor:default;background:none;padding:0}
-.srcinfo:hover,.srcinfo:focus-visible{color:var(--text)}
-.srcinfo .tip{display:none;position:absolute;top:calc(100% + 10px);left:0;z-index:var(--z-tooltip);width:max-content;max-width:min(420px,80vw);text-align:left;white-space:normal;flex-direction:column;gap:var(--space-1);cursor:auto}
+.srcinfo.none{cursor:default;border:0;background:none;padding:0;height:auto}
+.srcinfo:focus-visible{color:var(--text)}
+/* Tooltip: 마우스는 300ms 뒤, 키보드 포커스는 바로 보여요. Esc 로 닫혀요. 근거 원문을 담느라 최대 폭만 시스템(260px)보다 넓게 둬요 */
+.srcinfo .tip{display:flex;visibility:hidden;opacity:0;position:absolute;top:calc(100% + var(--space-3));left:0;z-index:var(--z-tooltip);width:max-content;max-width:min(400px,80vw);text-align:left;white-space:normal;flex-direction:column;gap:var(--space-1);cursor:auto;animation:none;transition:opacity var(--duration-fast) var(--ease-in),visibility 0s linear var(--duration-fast)}
 .srcinfo .tip::before,.srcinfo .tip::after{left:24px}
-.srcinfo:hover .tip,.srcinfo:focus-within .tip{display:flex}
+@media (hover:hover){.srcinfo:hover .tip{visibility:visible;opacity:1;transition:opacity var(--duration-fast) var(--ease-out) 300ms,visibility 0s linear 300ms}}
+.srcinfo:focus-within .tip{visibility:visible;opacity:1;transition:opacity var(--duration-fast) var(--ease-out)}
+.srcinfo.tip-off .tip{visibility:hidden !important;opacity:0 !important;transition:none !important}
 .tip-row{display:flex;gap:var(--space-2);color:var(--text)}
 .tip-row b{flex:none;color:var(--text-muted);font-weight:700}
 .tip-quote{margin-top:var(--space-1);padding:var(--space-2) var(--space-3);border-radius:var(--radius-sm);background:var(--surface-subtle);color:var(--text);font-weight:400}
 .tip-why{color:var(--text-muted);font-weight:400}
-.task .owner{display:inline-flex;align-items:center;margin-left:var(--space-2);padding:0 var(--space-2);height:24px;border-radius:var(--radius-full);border:1px solid var(--border);font-size:12px;line-height:18px;font-weight:700;color:var(--text-muted);vertical-align:middle}
+.task .owner{margin-left:var(--space-2);vertical-align:middle;font-weight:500}
 .task.done .what{font-weight:500;color:var(--text-muted);text-decoration:line-through}
 .task .badge{flex:none}
 .done-acc{margin-top:var(--space-3)}
@@ -290,11 +303,11 @@ body{font-size:16px;line-height:26px}
 .t-body{display:flex;flex-direction:column;min-width:0}
 .t-sub{font-size:14px;line-height:22px;color:var(--text-muted)}
 @media (max-width:767px){.t-flow li{flex-direction:column;gap:0}.t-when{width:auto}}
-.search{position:relative;margin-bottom:var(--space-6)}
-.search svg{position:absolute;left:var(--space-4);top:50%;transform:translateY(-50%);color:var(--text-muted);pointer-events:none}
-.search .input{padding-left:calc(var(--space-4) + 28px)}
+.search-bar{margin-bottom:var(--space-6)}
+.search .clear[hidden]{display:none}
+#main>.stats,#main>.alert-row{grid-column:1/-1}
+@media (min-width:1280px){#main>.stats,#main>.alert-row{margin-bottom:0}}
 .more-row{display:flex;justify-content:center;padding:var(--space-2)}
-#searchRes .sec{justify-content:space-between}
 .promo-acc{margin-top:var(--space-8)}
 .promo-acc summary{color:var(--text-muted)}
 .promo-acc .promo-list{padding:0;color:var(--text)}
@@ -306,15 +319,15 @@ body{font-size:16px;line-height:26px}
 .flag-actions{display:flex;gap:var(--space-3);flex-wrap:wrap}
 .mails .banner{box-shadow:none}
 .mails .banner .btn{flex:none}
-.tag.neutral{background:var(--surface-subtle);color:var(--text-muted)}
+.banner button.act{border:0;background:none;font-family:inherit;cursor:pointer}
 .empty .hint{max-width:360px}
 .mails details.flash>summary{box-shadow:inset 0 0 0 2px var(--primary)}
 @media (max-width:767px){
   .wrap{padding:var(--space-6) var(--space-4) var(--space-12)}
   .top h1{font-size:24px;line-height:34px}
-  .stats{grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--space-3)}
+  .stats{grid-template-columns:minmax(0,1fr);gap:var(--space-3)}
   .task{padding:var(--space-3) var(--space-4);flex-wrap:wrap;gap:0 var(--space-3)}
-  .task .badge{margin-left:calc(22px + var(--space-3))}
+  .task>.badge{margin-left:calc(22px + var(--space-3))}
   .mails summary{padding:var(--space-4)}
 }`;
 
@@ -349,13 +362,15 @@ function render() {
 </head>
 <body><div class="wrap">
   <header class="top"><h1>메일 할 일</h1><p class="hint">마지막 갱신 ${built}</p></header>
-  <div class="search" role="search"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
-    <input id="q" class="input" type="search" placeholder="제목, 보낸 사람, 할 일, 내용으로 찾기 (Ctrl+F)" aria-label="메일 검색" autocomplete="off"></div>
-  <section id="searchRes" style="display:none"><div class="sec"><h2 id="searchSum"></h2><button type="button" class="btn ghost" data-clear="1">검색 지우기</button></div><div id="searchList"></div></section>
+  <span class="search search-bar" role="search"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg>
+    <input id="q" class="input" type="search" placeholder="제목, 보낸 사람, 할 일, 내용으로 찾기 (Ctrl+F)" aria-label="메일 검색" autocomplete="off">
+    <button type="button" class="clear" data-clear="1" aria-label="검색어 지우기" hidden><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button></span>
+  <section id="searchRes" style="display:none"><div class="sec"><h2 id="searchSum" aria-live="polite"></h2></div><div id="searchList"></div></section>
   <div id="main">
   <section class="stats" id="stats" aria-label="요약"></section>
   <div class="alert-row" id="alert"></div>
 
+  <div class="col">
   <div class="sec"><h2>처리할 일</h2><span class="hint" id="taskHint"></span></div>
   <div class="card list" id="open"></div>
   <div class="acc done-acc" id="watchWrap"><details><summary><span><span id="watchSum"></span> <span class="hint" style="font-weight:500">· 숫자·알림에는 빠져요</span></span><span aria-hidden="true">⌄</span></summary><div class="body" id="watch"></div></details></div>
@@ -363,10 +378,13 @@ function render() {
 
   <div id="seriesSec"><div class="sec"><h2>반복 메일</h2><span class="hint">같은 종류끼리 묶어 지난번과 달라진 점을 보여 드려요</span></div>
   <div class="acc series" id="series"></div></div>
+  </div>
 
+  <div class="col">
   <div class="sec"><h2>받은 메일</h2><span class="hint">눌러서 자세히 보기</span></div>
   <div id="mails"></div>
   <div class="acc promo-acc" id="promo"></div>
+  </div>
   </div>
 </div>
 <script>
@@ -417,6 +435,7 @@ const WATCH_HIDE_AFTER_DAYS = 3; // 마감이 3일 지난 지켜볼 일은 숨�
 // 칸별로 처음 보여 줄 개수 ("더 보기"로 늘어남)
 const SHOW = { open: 10, watch: 10, series: 5, hist: {}, mailDays: 3, promo: 20 };
 const moreBtn = (key, left, label) => left > 0 ? '<div class="more-row"><button type="button" class="btn ghost" data-more="'+esc(key)+'">'+(label || (left+"개 더 보기"))+'</button></div>' : '';
+let TIPN = 0;
 function srcInfo(s){
   if(!s || !s.file) return '<span class="srcinfo none">근거 위치 정보 없음</span>';
   const isBody = s.file === "메일 본문";
@@ -427,12 +446,13 @@ function srcInfo(s){
     (s.quote ? '<span class="tip-quote">“'+esc(s.quote)+'”</span>' : '')+
     (s.why ? '<span class="tip-why">'+esc(s.why)+'</span>' : '')+
     '</span>';
-  return '<span class="srcinfo" tabindex="0">'+(isBody ? ICON.mail : ICON.clip)+'<span class="srclabel">'+esc(label)+'</span>'+tip+'</span>';
+  const tid = "tip" + (++TIPN);
+  return '<span class="badge srcinfo" tabindex="0" aria-describedby="'+tid+'">'+(isBody ? ICON.mail : ICON.clip)+'<span class="srclabel">'+esc(label)+'</span>'+tip.replace('role="tooltip"', 'role="tooltip" id="'+tid+'"')+'</span>';
 }
 function taskRow(t){
   const done = !!doneMap[t.id];
   const who = (t.mail.from||"").split("·")[0].trim();
-  const owner = t.kind === "watch" ? '<span class="owner">담당 '+esc(t.owner || "미정")+'</span>' : '';
+  const owner = t.kind === "watch" ? ' <span class="badge owner"><span class="dot"></span>담당 '+esc(t.owner || "미정")+'</span>' : '';
   return '<div class="task'+(done?" done":"")+(t.kind === "watch" ? " watch" : "")+'"><label class="check"><input type="checkbox" class="box" data-id="'+esc(t.id)+'"'+(done?" checked":"")+'>'+
     '<span class="txt"><span class="what">'+esc(t.text)+owner+'</span><span class="src"><a href="#'+esc(t.mail.id)+'" data-open="'+esc(t.mail.id)+'">'+esc(t.mail.subject)+'</a> · '+esc(who)+'</span>'+srcInfo(t.source)+'</span></label>'+
     (done ? '<span class="badge success"><span class="dot"></span>'+esc(md(String(doneMap[t.id]).slice(0,10)))+' 완료</span>' : dueBadge(t.due))+'</div>';
@@ -504,22 +524,22 @@ function warnBlock(m, fl, wTitle){
   const why = esc(m.warning.split(":").slice(1).join(":").trim());
   const when = fl ? esc(md(String(flagMap[m.id].at).slice(0,10))) : "";
   if(fl === "safe") return '<div class="banner success" role="status">'+ICON.check+'<div class="txt"><strong>의심을 해제했어요 · '+when+'</strong>AI 판단: '+esc(wTitle)+(why?' — '+why:'')+'</div>'+
-    '<button type="button" class="btn ghost" data-flag="'+esc(m.id)+'" data-v="">되돌리기</button></div>';
+    '<button type="button" class="act" data-flag="'+esc(m.id)+'" data-v="">되돌리기</button></div>';
   if(fl === "danger") return '<div class="banner danger" role="alert">'+ICON.warn+'<div class="txt"><strong>위험 메일로 표시했어요 · '+when+'</strong>링크를 누르거나 코드를 입력하지 마세요. 정보보안 담당자에게 신고하면 좋아요.</div>'+
-    '<button type="button" class="btn ghost" data-flag="'+esc(m.id)+'" data-v="">되돌리기</button></div>';
+    '<button type="button" class="act" data-flag="'+esc(m.id)+'" data-v="">되돌리기</button></div>';
   return '<div class="banner warning" role="alert">'+ICON.warn+'<div class="txt"><strong>'+esc(wTitle)+' · 확인이 필요해요</strong>'+why+'</div></div>'+
     '<div class="flag-actions"><button type="button" class="btn outline" data-flag="'+esc(m.id)+'" data-v="safe">의심 해제하기</button>'+
-    '<button type="button" class="btn danger" data-flag="'+esc(m.id)+'" data-v="danger">위험으로 표시하기</button></div>';
+    '<button type="button" class="btn secondary" data-flag="'+esc(m.id)+'" data-v="danger">위험으로 표시하기</button></div>';
 }
 const LV = {high:['danger','중요'], mid:['warning','보통'], low:['','참고']};
 function mailItem(m, prefix){
   const [cls, txt] = LV[m.importance] || LV.mid;
   const tags = [];
   const th = THREADS[m.id];
-  if(th) tags.push('<span class="tag neutral">대화 '+th.length+'통</span>');
-  if(m.series && m.series.name) tags.push('<span class="tag neutral">'+esc(m.series.name)+(m.series.issue ? ' · '+esc(m.series.issue) : '')+'</span>');
   if((m.tasks||[]).length) tags.push('<span class="tag">할 일 '+m.tasks.length+'</span>');
-  if((m.attachments||[]).length) tags.push('<span class="tag neutral">첨부 '+m.attachments.length+'</span>');
+  if(th) tags.push('<span class="tag">대화 '+th.length+'통</span>');
+  if(m.series && m.series.name) tags.push('<span class="tag">'+esc(m.series.name)+(m.series.issue ? ' · '+esc(m.series.issue) : '')+'</span>');
+  if((m.attachments||[]).length) tags.push('<span class="tag">첨부 '+m.attachments.length+'</span>');
   const fl = flagOf(m), wTitle = m.warning ? m.warning.split(":")[0] : "";
   if(m.warning) tags.push(
     fl === "safe" ? '<span class="badge success"><span class="dot"></span>의심 해제</span>' :
@@ -532,7 +552,7 @@ function mailItem(m, prefix){
     '<span class="m-side">'+(prefix ? esc(md(m.date))+' ' : '')+esc(m.time)+'<span class="chev" aria-hidden="true">⌄</span></span><span aria-hidden="true"></span>'+
     '</summary><div class="body"><div class="from-row"><span class="from">보낸 사람 · '+esc(m.from)+'</span>'+
     '<span class="open-btns">'+
-    '<a class="btn outline" href="'+esc(m.gwUrl || GW_HOME)+'" target="_blank" rel="noopener">'+(m.gwUrl ? "그룹웨어에서 열기" : "그룹웨어 열기")+'</a></span></div>'+
+    '<a class="btn secondary" href="'+esc(m.gwUrl || GW_HOME)+'" target="_blank" rel="noopener">'+(m.gwUrl ? "그룹웨어에서 열기" : "그룹웨어 열기")+'</a></span></div>'+
     (m.warning ? warnBlock(m, fl, wTitle) : "")+
     blk("할 일", (m.tasks||[]).map(t => esc(t.text)+(t.due?' · '+esc(md(t.due))+'까지':"")+(t.kind === "watch" ? ' · 지켜볼 일(담당 '+esc(t.owner || "미정")+')' : '')+'<br>'+srcInfo(t.source))) +
     ((m.threadNew||[]).length ? '<div class="blk"><h3>이번 답장에서 새로 나온 내용</h3><ul class="t-new">'+m.threadNew.map(x => '<li>'+esc(x)+'</li>').join("")+'</ul></div>' : '') +
@@ -587,7 +607,7 @@ function renderSearch(){
   const hits = MAILS.filter(m => { const h = haystack(m); return words.every(w => h.includes(w)); })
     .sort((a,b) => (b.date+b.time).localeCompare(a.date+a.time));
   main.style.display = "none"; res.style.display = "";
-  document.getElementById("searchSum").textContent = "“"+q+"” 검색 결과 "+hits.length+"통";
+  document.getElementById("searchSum").textContent = "“"+document.getElementById("q").value.trim()+"” 검색 결과 "+hits.length+"통";
   document.getElementById("searchList").innerHTML = hits.length
     ? '<div class="acc mails">'+hits.slice(0, 50).map(m => mailItem(m, "s-")).join("")+'</div>'+(hits.length > 50 ? '<p class="hint">결과가 많아 최근 50통만 보여 드려요. 검색어를 더 붙여 보세요.</p>' : '')
     : '<div class="card"><div class="empty">'+ICON.inbox+'<b style="font-size:18px">찾는 메일이 없어요</b><span class="hint">대시보드에 남아 있는 최근 메일에서만 찾아요. 45일 지난 메일은 월별 보관 파일에 있어요.</span></div></div>';
@@ -597,18 +617,23 @@ document.addEventListener("change", e => {
   if(e.target.checked) doneMap[id] = new Date().toISOString(); else delete doneMap[id];
   store.set("gwmail.done", doneMap); render();
 });
-document.getElementById("q").addEventListener("input", renderSearch);
+let qTimer = null; // SearchInput: 입력 후 300ms 쉬었다가 찾고, 글자가 있을 때만 지우기 버튼
+document.getElementById("q").addEventListener("input", e => {
+  document.querySelector(".search-bar .clear").hidden = !e.target.value;
+  clearTimeout(qTimer); qTimer = setTimeout(renderSearch, 300);
+});
 document.addEventListener("keydown", e => {
   const q = document.getElementById("q");
   // Ctrl+F: 대시보드 검색창으로 (검색창에 있을 때 한 번 더 누르면 브라우저 기본 찾기)
   if((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "f" && document.activeElement !== q){
     e.preventDefault(); q.focus(); q.select(); window.scrollTo({ top: 0, behavior: "auto" });
   }
-  if(e.key === "Escape" && document.activeElement === q && q.value){ q.value = ""; renderSearch(); }
+  if(e.key === "Escape" && document.activeElement === q && q.value){ q.value = ""; document.querySelector(".search-bar .clear").hidden = true; renderSearch(); }
+  if(e.key === "Escape"){ document.querySelectorAll(".srcinfo:hover, .srcinfo:focus-within").forEach(el => { el.classList.add("tip-off"); el.addEventListener("mouseleave", () => el.classList.remove("tip-off"), { once: true }); el.addEventListener("blur", () => el.classList.remove("tip-off"), { once: true }); }); }
 });
 document.addEventListener("click", e => {
   if(e.target.closest(".srcinfo") && !e.target.closest("a")){ e.preventDefault(); return; } // 근거 칩을 눌러도 체크되지 않게
-  if(e.target.closest("[data-clear]")){ const q = document.getElementById("q"); q.value = ""; renderSearch(); q.focus(); return; }
+  if(e.target.closest("[data-clear]")){ const q = document.getElementById("q"); q.value = ""; document.querySelector(".search-bar .clear").hidden = true; renderSearch(); q.focus(); return; }
   const mo = e.target.closest("[data-more]");
   if(mo){
     e.preventDefault();
