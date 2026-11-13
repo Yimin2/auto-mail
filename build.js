@@ -247,6 +247,7 @@ body{font-size:16px;line-height:26px}
 .tip-quote{margin-top:var(--space-1);padding:var(--space-2) var(--space-3);border-radius:var(--radius-sm);background:var(--surface-subtle);color:var(--text);font-weight:400}
 .tip-why{color:var(--text-muted);font-weight:400}
 .task .owner{margin-left:var(--space-2);vertical-align:middle;font-weight:500}
+.all-done{margin:0;padding:var(--space-3) var(--space-6) var(--space-4)}
 .task.done .what{font-weight:500;color:var(--text-muted);text-decoration:line-through}
 .task .badge{flex:none}
 .done-acc{margin-top:var(--space-3)}
@@ -433,6 +434,8 @@ const isPromo = m => m.category === "promo" && !m.warning;
 const WORK = MAILS.filter(m => !isPromo(m)), PROMO = MAILS.filter(isPromo);
 const tasks = WORK.flatMap(m => (m.tasks||[]).map(t => ({...t, mail:m})));
 const DONE_KEEP_DAYS = 7;
+const localDay = iso => { const d = new Date(iso); return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0"); };
+const doneToday = id => !!doneMap[id] && localDay(doneMap[id]) === today;
 const WATCH_HIDE_AFTER_DAYS = 3; // 마감이 3일 지난 지켜볼 일은 숨김(내 일이 아니므로)
 // 칸별로 처음 보여 줄 개수 ("더 보기"로 늘어남)
 const SHOW = { open: 10, watch: 10, series: 5, hist: {}, mailDays: 3, promo: 20 };
@@ -466,12 +469,17 @@ function render(){
   };
   const open = tasks.filter(t => !doneMap[t.id] && t.kind !== "watch").sort(byDue);
   const watch = tasks.filter(t => !doneMap[t.id] && t.kind === "watch" && !(t.due && dayDiff(t.due) < -WATCH_HIDE_AFTER_DAYS)).sort(byDue);
+  // 오늘 체크한 일은 목록 맨 아래에 체크된 채로 남겨요(잘못 눌렀을 때 바로 되돌리기). 내일부터는 완료한 일 칸에만 보여요.
+  const byDoneAt = (a,b) => String(doneMap[a.id]).localeCompare(String(doneMap[b.id]));
+  const openToday = tasks.filter(t => t.kind !== "watch" && doneToday(t.id)).sort(byDoneAt);
+  const watchToday = tasks.filter(t => t.kind === "watch" && doneToday(t.id)).sort(byDoneAt);
+  const openRows = open.concat(openToday), watchRows = watch.concat(watchToday);
   const doneCut = Date.now() - DONE_KEEP_DAYS*864e5; // 완료한 일은 체크 후 7일만 보여요
   const done = tasks.filter(t => doneMap[t.id] && new Date(doneMap[t.id]).getTime() >= doneCut).sort((a,b) => String(doneMap[b.id]).localeCompare(String(doneMap[a.id])));
   const wbox = document.getElementById("watchWrap");
-  wbox.style.display = watch.length ? "" : "none";
+  wbox.style.display = watchRows.length ? "" : "none";
   document.getElementById("watchSum").textContent = "지켜볼 일 · 참조 메일 "+watch.length+"개";
-  document.getElementById("watch").innerHTML = watch.slice(0, SHOW.watch).map(taskRow).join("") + moreBtn("watch", watch.length - SHOW.watch);
+  document.getElementById("watch").innerHTML = watchRows.slice(0, SHOW.watch).map(taskRow).join("") + moreBtn("watch", watchRows.length - SHOW.watch);
   const dueToday = open.filter(t => t.due && dayDiff(t.due) <= 0);
   const dueSoon = open.filter(t => t.due && dayDiff(t.due) === 1);
   const todayMails = WORK.filter(m => m.date === today).length;
@@ -491,7 +499,7 @@ function render(){
   document.getElementById("alert").style.display = alert ? "" : "none";
 
   document.getElementById("taskHint").textContent = open.length ? "마감이 가까운 순서예요. 끝낸 일은 체크하세요." : "";
-  document.getElementById("open").innerHTML = open.length ? open.slice(0, SHOW.open).map(taskRow).join("") + moreBtn("open", open.length - SHOW.open) :
+  document.getElementById("open").innerHTML = openRows.length ? openRows.slice(0, SHOW.open).map(taskRow).join("") + moreBtn("open", openRows.length - SHOW.open) + (!open.length ? '<p class="hint all-done">오늘 할 일을 모두 끝냈어요. 잘못 체크했다면 체크를 풀면 돼요.</p>' : "") :
     '<div class="empty">'+ICON.done+'<b style="font-size:18px">남은 할 일이 없어요</b><span class="hint">새 메일에서 할 일이 생기면 여기에 바로 보여 드릴게요.</span></div>';
   document.getElementById("doneWrap").style.display = done.length ? "" : "none";
   document.getElementById("doneSum").textContent = "완료한 일 "+done.length+"개";
