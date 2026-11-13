@@ -305,6 +305,8 @@ body{font-size:16px;line-height:26px}
 @media (max-width:767px){.t-flow li{flex-direction:column;gap:0}.t-when{width:auto}}
 .search-bar{margin-bottom:var(--space-6)}
 .search .clear[hidden]{display:none}
+/* 펼친 아코디언 본문은 제목 줄(호버 배경)과 띄워요 */
+.mails .body,.series .body{padding-top:var(--space-4);border-top:1px solid var(--border)}
 #main>.stats,#main>.alert-row{grid-column:1/-1}
 @media (min-width:1280px){#main>.stats,#main>.alert-row{margin-bottom:0}}
 .more-row{display:flex;justify-content:center;padding:var(--space-2)}
