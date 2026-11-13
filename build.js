@@ -25,7 +25,7 @@ function archiveOld(list) {
   const done = (readJson(`${ROOT}/data/marks.json`, {}).done) || {}; // 대시보드 체크 기록(브리핑 때 갱신)
   for (const m of list) {
     const age = (now - new Date(m.date || m.addedAt).getTime()) / 86400e3;
-    const hasTask = (m.tasks || []).some((t) => !done[t.id]); // 아직 끝내지 않은 할 일이 있을 때만 오래 둔다
+    const hasTask = (m.tasks || []).some((t) => !done[t.id] && !t.superseded); // 아직 끝내지 않은 할 일이 있을 때만 오래 둔다
     if (age < KEEP_DAYS || (hasTask && age < KEEP_TASK_DAYS)) keep.push(m);
     else (move[String(m.date || m.addedAt).slice(0, 7)] ||= []).push(m);
   }
@@ -46,7 +46,8 @@ function ingest(rawFile, pendingFile) {
   let parsed = null;
   try {
     const s = raw.replace(/```(?:json)?/g, "");
-    parsed = JSON.parse(s.slice(s.indexOf("["), s.lastIndexOf("]") + 1));
+    const st = s.indexOf("[{") >= 0 ? s.indexOf("[{") : s.indexOf("["); // 앞에 경고 문구가 섞여도 JSON 배열 시작부터 읽기
+    parsed = JSON.parse(s.slice(st, s.lastIndexOf("]") + 1));
     if (!Array.isArray(parsed)) parsed = null;
   } catch { parsed = null; }
 
@@ -84,6 +85,15 @@ function ingest(rawFile, pendingFile) {
         importance: "mid", oneLine: "요약 형식 오류: 아래 원문 참고", points: [raw.trim().slice(0, 1500)], attachments: [],
         tasks: [], warning: null, addedAt: now,
       });
+    }
+  }
+  // 낡은 할 일 표시: Claude 가 supersedes 로 지목한 앞선 대화의 할 일을 "변경됨"으로 (목록·숫자·알림에서 빠짐)
+  if (parsed) for (const m of parsed) {
+    for (const s of m.supersedes || []) {
+      const tid = s && s.taskId; if (!tid) continue;
+      const owner = byId.get(String(tid).split("#")[0]);
+      const t = owner && (owner.tasks || []).find((x) => x.id === tid);
+      if (t && !t.superseded) t.superseded = { by: idOf(m.dir), why: s.why ? String(s.why).slice(0, 160) : null, at: now };
     }
   }
   // 반복 메일 소급 묶기: Claude 가 backfill 로 지목한 예전 메일에 같은 묶음 이름을 붙인다
@@ -140,7 +150,8 @@ function threadContext(pendingFile) {
     const k = threadKey(p.subject);
     const prev = all.filter((m) => threadKey(m.subject) === k).sort((a, b) => (b.date + b.time).localeCompare(a.date + a.time)).slice(0, 4);
     if (!prev.length) continue;
-    out.push(`- 대상: ${p.dir}\n` + prev.map((m) => `  · ${m.date} ${m.time} ${m.from}: ${m.oneLine} | ${(m.points || []).slice(0, 3).join(" / ")}`).join("\n"));
+    out.push(`- 대상: ${p.dir}\n` + prev.map((m) => `  · ${m.date} ${m.time} ${m.from}: ${m.oneLine} | ${(m.points || []).slice(0, 3).join(" / ")}` +
+      (m.tasks || []).filter((t) => !t.superseded).map((t) => `\n    할 일 [${t.id}] ${t.text}${t.due ? ` (마감 ${t.due})` : ""}`).join("")).join("\n"));
   }
   console.log(out.length ? out.join("\n") : "(없음)");
 }
@@ -183,7 +194,7 @@ function brief() {
   const done = marks.done || {}, flag = marks.flag || {};
   const k = new Date(Date.now() + 9 * 3600e3), today = k.toISOString().slice(0, 10);
   const work = mails.filter((m) => !(m.category === "promo" && !m.warning));
-  const open = work.flatMap((m) => (m.tasks || []).filter((t) => !done[t.id] && t.kind !== "watch").map((t) => ({ text: t.text, due: t.due, subject: m.subject })));
+  const open = work.flatMap((m) => (m.tasks || []).filter((t) => !done[t.id] && t.kind !== "watch" && !t.superseded).map((t) => ({ text: t.text, due: t.due, subject: m.subject })));
   const dueToday = open.filter((t) => t.due === today);
   const overdue = open.filter((t) => t.due && t.due < today);
   const week = new Date(Date.now() - 7 * 864e5).toISOString().slice(0, 10);
@@ -430,7 +441,7 @@ function dueBadge(due){
 const imp = {high:0, mid:1, low:2};
 const isPromo = m => m.category === "promo" && !m.warning;
 const WORK = MAILS.filter(m => !isPromo(m)), PROMO = MAILS.filter(isPromo);
-const tasks = WORK.flatMap(m => (m.tasks||[]).map(t => ({...t, mail:m})));
+const tasks = WORK.flatMap(m => (m.tasks||[]).filter(t => !t.superseded).map(t => ({...t, mail:m}))); // 답장으로 낡은 할 일(변경됨)은 목록에서 뺌
 const DONE_KEEP_DAYS = 7;
 const WATCH_HIDE_AFTER_DAYS = 3; // 마감이 3일 지난 지켜볼 일은 숨김(내 일이 아니므로)
 // 칸별로 처음 보여 줄 개수 ("더 보기"로 늘어남)
@@ -555,7 +566,7 @@ function mailItem(m, prefix){
     '<span class="open-btns">'+
     '<a class="btn secondary" href="'+esc(m.gwUrl || GW_HOME)+'" target="_blank" rel="noopener">'+(m.gwUrl ? "그룹웨어에서 열기" : "그룹웨어 열기")+'</a></span></div>'+
     (m.warning ? warnBlock(m, fl, wTitle) : "")+
-    blk("할 일", (m.tasks||[]).map(t => esc(t.text)+(t.due?' · '+esc(md(t.due))+'까지':"")+(t.kind === "watch" ? ' · 지켜볼 일(담당 '+esc(t.owner || "미정")+')' : '')+'<br>'+srcInfo(t.source))) +
+    blk("할 일", (m.tasks||[]).map(t => t.superseded ? '<s>'+esc(t.text)+'</s> <span class="badge"><span class="dot"></span>변경됨</span>'+(t.superseded.why ? '<br><span class="hint">'+esc(t.superseded.why)+'</span>' : "") : esc(t.text)+(t.due?' · '+esc(md(t.due))+'까지':"")+(t.kind === "watch" ? ' · 지켜볼 일(담당 '+esc(t.owner || "미정")+')' : '')+'<br>'+srcInfo(t.source))) +
     ((m.threadNew||[]).length ? '<div class="blk"><h3>이번 답장에서 새로 나온 내용</h3><ul class="t-new">'+m.threadNew.map(x => '<li>'+esc(x)+'</li>').join("")+'</ul></div>' : '') +
     blk("핵심 내용", (m.points||[]).map(esc)) +
     (th ? '<div class="blk"><h3>대화 흐름 · '+th.length+'통</h3><ol class="t-flow">'+th.map((it, i) =>
@@ -672,6 +683,13 @@ document.addEventListener("click", e => {
   d.classList.add("flash"); setTimeout(() => d.classList.remove("flash"), 1600);
 });
 render(); renderSeries(); renderMails();
+// 열어 둔 대시보드는 5분마다 새로 읽어요. 검색 중이거나, 펼쳐 둔 메일·묶음이 있거나, 입력 중이면 다음 번으로 미뤄요.
+setInterval(() => {
+  const busy = document.getElementById("q").value.trim() ||
+    document.querySelector("#mails details[open], #series details[open], #searchList details[open]") ||
+    (document.activeElement && /INPUT|TEXTAREA/.test(document.activeElement.tagName));
+  if (!busy) location.reload();
+}, 5 * 60 * 1000);
 </script></body></html>`, "utf8");
   console.log("rendered " + mails.length);
 }

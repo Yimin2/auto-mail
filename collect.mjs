@@ -59,8 +59,12 @@ function bodyText(body) {
 }
 
 // ---------- office(zip) 텍스트 추출 ----------
+// zip 폭탄 방지: 항목 하나는 풀어서 20MB, 전체는 60MB까지만 (넘으면 UNZIP_LIMIT 오류)
+const UNZIP_MAX_ENTRY = 20 * 1024 * 1024;
+const UNZIP_MAX_TOTAL = 60 * 1024 * 1024;
 function unzipEntries(buf) {
   const out = {};
+  let total = 0;
   let eocd = -1;
   for (let i = buf.length - 22; i >= Math.max(0, buf.length - 66000); i--) if (buf.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
   if (eocd < 0) return out;
@@ -74,7 +78,17 @@ function unzipEntries(buf) {
     const name = buf.slice(p + 46, p + 46 + nlen).toString("utf8");
     const dataStart = local + 30 + buf.readUInt16LE(local + 26) + buf.readUInt16LE(local + 28);
     const raw = buf.slice(dataStart, dataStart + csize);
-    try { out[name] = method === 8 ? zlib.inflateRawSync(raw) : raw; } catch {}
+    // 필요한 XML 만 푼다 (슬라이드·문서·시트·공유 문자열)
+    if (/^(ppt\/slides\/slide\d+|word\/document|xl\/worksheets\/sheet\d+|xl\/sharedStrings)\.xml$/.test(name)) {
+      let data;
+      try { data = method === 8 ? zlib.inflateRawSync(raw, { maxOutputLength: UNZIP_MAX_ENTRY }) : raw; }
+      catch (e) { if (e && (e.code === "ERR_BUFFER_TOO_LARGE" || /maxOutputLength|too large/i.test(String(e.message)))) throw new Error("UNZIP_LIMIT"); data = null; }
+      if (data) {
+        total += data.length;
+        if (data.length > UNZIP_MAX_ENTRY || total > UNZIP_MAX_TOTAL) throw new Error("UNZIP_LIMIT");
+        out[name] = data;
+      }
+    }
     p += 46 + nlen + elen + clen;
   }
   return out;
@@ -133,6 +147,18 @@ try {
     list = await page.fetch(`${MAILDB}/api/data/collections/name/($inbox_all_portal)?ps=40&page=0`, { timeout: 30000 });
     try { entries = JSON.parse(list.body); } catch { entries = null; }
   }
+  // 놓침 방지: 첫 페이지가 모두 새 메일이면 이미 처리한 메일이 나올 때까지 다음 페이지도 가져온다(최대 10페이지)
+  if (Array.isArray(entries) && !firstRun) {
+    let last = entries;
+    for (let pg = 1; pg < 10 && last.length >= 40 && last.every((e) => !seen.has(e["@unid"])); pg++) {
+      try {
+        last = JSON.parse((await page.fetch(`${MAILDB}/api/data/collections/name/($inbox_all_portal)?ps=40&page=${pg}`, { timeout: 30000 })).body);
+        if (!Array.isArray(last) || !last.length) break;
+        entries = entries.concat(last);
+      } catch { break; }
+    }
+    result.pages = Math.ceil(entries.length / 40);
+  }
   if (!Array.isArray(entries)) {
     result.ok = false; result.loginRequired = true;
     result.message = `메일 목록을 못 읽었습니다(HTTP ${list.status}). 그룹웨어 로그인이 풀렸을 수 있습니다.`;
@@ -167,7 +193,14 @@ try {
               try {
                 const t = officeText(a.name, await fs.readFile(out));
                 if (t) { item.text = out.replace(/\.[^.]+$/, ".txt"); await fs.writeFile(item.text, t, "utf8"); }
-              } catch {}
+              } catch (err) {
+                // 압축 해제 크기 초과(zip 폭탄 의심) 등: 원본은 지우고, 요약에는 "읽지 못함"으로 알린다
+                item.skipped = String(err && err.message) === "UNZIP_LIMIT" ? "압축을 풀면 너무 커서 읽지 않음(손상 또는 zip 폭탄 의심)" : "텍스트 추출 실패";
+                item.text = out.replace(/\.[^.]+$/, ".txt");
+                await fs.writeFile(item.text, `읽지 못함: ${item.skipped}`, "utf8");
+                try { await fs.unlink(out); } catch {}
+                item.saved = null;
+              }
             }
           }
         }

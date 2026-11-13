@@ -25,3 +25,5 @@ ds/
 # 로컬 도구
 claude-cli/
 node_modules/
+pending-chunk.json
+collect-fail.json
