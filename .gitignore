@@ -19,9 +19,6 @@ flags/
 *.out
 *.err
 
-# 디자인 시스템 변환 결과 (tools/make-ds.js 로 다시 만듦)
-ds/
-
 # 로컬 도구
 claude-cli/
 node_modules/

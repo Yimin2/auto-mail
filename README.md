@@ -106,7 +106,7 @@ Windows 작업 스케줄러 (월~금 08:00~19:00, 1분마다)
 **각자 준비할 것**
 - Claude 계정: 요약 비용은 각자 부담해요. 메일 확인 자체에는 토큰이 들지 않아요
 - ego lite 설치와 그룹웨어 로그인
-- (선택) 디자인 시스템: `ds/`는 저장소에 포함되지 않아요. 없으면 대시보드가 기본 스타일 없이 보여요. 자신의 디자인 시스템(`tokens.json` · `components/bundle.css` · 폰트)이 있으면 `tools/make-ds.js`로 만들어 쓰세요
+- 디자인 시스템: `ds/`에 포함되어 있어서 내려받으면 같은 화면이 나와요. 자신의 디자인 시스템으로 바꾸려면 아래 설치 4번을 보세요
 
 ### 내 설정값 찾는 법 (Domino 그룹웨어)
 
@@ -134,7 +134,7 @@ Windows 작업 스케줄러 (월~금 08:00~19:00, 1분마다)
 
 2. ego 브라우저에서 그룹웨어에 로그인해 둡니다. ego lite를 기본 브라우저로 두면 알림을 눌렀을 때 대시보드가 ego에서 열리고, 체크 기록이 브리핑에 반영됩니다.
 3. Claude CLI를 설치하고 로그인합니다. `claude`를 실행한 뒤 `/login`을 입력하면 됩니다.
-4. (선택) 디자인 시스템을 적용하려면 `node tools/make-ds.js <디자인 시스템 project 폴더>`를 실행합니다. `ds/`가 생성되고, 없으면 기본 스타일 없이 동작합니다.
+4. (선택) 대시보드는 `ds/`에 들어 있는 디자인 시스템으로 그려집니다. 자신의 디자인 시스템(`tokens.json` · `components/bundle.css` · `fonts/PretendardVariable.woff2` 구성)으로 바꾸려면 `node tools/make-ds.js <디자인 시스템 project 폴더>`를 실행하세요. `ds/`가 새로 만들어집니다.
 5. 작업 스케줄러에 등록합니다. 월~금 08:00부터 11시간 동안 1분 간격으로 실행돼요:
 
    ```
@@ -169,10 +169,17 @@ Windows 작업 스케줄러 (월~금 08:00~19:00, 1분마다)
 | `build.js` | 요약 저장·보관, 반복 메일·대화 묶기, 브리핑 집계, 대시보드 생성 |
 | `markread.mjs` | 그룹웨어 읽음 처리 |
 | `marks.mjs` | 대시보드의 체크 기록·의심 판정을 브라우저에서 읽어 오기 (브리핑용) |
+| `ds/` | 대시보드 디자인 시스템: `tokens.css`(색·간격·모서리·그림자·움직임), `bundle.css`(부품), `font.css`(Pretendard) |
 | `tools/make-ds.js` | 디자인 시스템 → `ds/` CSS 변환 |
 | `config.example.json` | 개인 설정 예시 |
 
 **실행 중에 생기는 파일 (git 제외):** `config.json`, `inbox/`, `data/`, `dashboard.html`, `pending.json`, `state.json`, `run.log`, `flags/`, `last-*.json`, `*.err`, `*.out`
+
+---
+
+## 라이선스 참고
+
+- 대시보드 글꼴 **Pretendard**(`ds/font.css`)는 SIL Open Font License 1.1을 따릅니다. 전문은 [`ds/LICENSE-Pretendard.txt`](ds/LICENSE-Pretendard.txt)에 있어요. 글꼴만 따로 판매할 수는 없지만, 프로그램에 넣어 함께 배포하는 건 자유예요.
 
 ---
 
