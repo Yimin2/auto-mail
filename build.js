@@ -72,7 +72,7 @@ function ingest(rawFile, pendingFile) {
         warning: m.warning || null, addedAt: now,
         threadNew: (m.threadNew || []).map((c) => String(c).slice(0, 120)).slice(0, 4),
         series: m.series && m.series.name ? { name: String(m.series.name).slice(0, 40), issue: m.series.issue ? String(m.series.issue).slice(0, 30) : null,
-          changes: (m.series.changes || []).map((c) => String(c).slice(0, 120)).slice(0, 4) } : null,
+          changes: (m.series.changes || []).map((c) => String(c).slice(0, 120)).slice(0, 4), compared: m.series.compared === true || m.series.compared === "true" } : null,
       });
     }
   } else {
@@ -165,16 +165,15 @@ function seriesGroups() {
 // 요약 지침에 넣을 "알고 있는 묶음" (묶음별 직전 회차, 최근 것 20개)
 function seriesContext() {
   const g = [...seriesGroups().entries()].sort((a, b) => (b[1][0].date + b[1][0].time).localeCompare(a[1][0].date + a[1][0].time)).slice(0, 20);
-  console.log(g.length ? g.map(([name, arr]) => {
-    const m = arr[0];
-    return `- 묶음: ${name} | 직전 회차: ${(m.series && m.series.issue) || m.date} (${m.date}) | ${m.oneLine}\n  핵심: ${(m.points || []).join(" / ")}`;
-  }).join("\n") : "(아직 없음)");
+  // 묶음마다 최근 5회차를 준다 (Redmine 일감 번호처럼 같은 대상의 이전 회차를 찾아 비교하도록)
+  console.log(g.length ? g.map(([name, arr]) => `- 묶음: ${name}\n` + arr.slice(0, 5).map((m) =>
+    `  · ${(m.series && m.series.issue) || "-"} (${m.date} ${m.time}) | ${m.oneLine}\n    핵심: ${(m.points || []).slice(0, 5).join(" / ")}`).join("\n")).join("\n") : "(아직 없음)");
   // 새 묶음을 만들 때 소급해서 넣을 수 있도록, 최근 30일 동안 묶음 없는 메일 목록도 준다
   const cut = new Date(Date.now() - 30 * 864e5).toISOString().slice(0, 10);
   const loose = readJson(DATA, []).filter((m) => !(m.series && m.series.name) && m.date >= cut && m.category !== "promo")
     .sort((a, b) => (b.date + b.time).localeCompare(a.date + a.time)).slice(0, 40);
-  console.log("\n최근 묶음 없는 메일(id | 날짜 | 보낸 사람 | 제목):");
-  console.log(loose.length ? loose.map((m) => `- ${m.id} | ${m.date} | ${String(m.from || "").split("·")[0].trim()} | ${m.subject}`).join("\n") : "(없음)");
+  console.log("\n최근 묶음 없는 메일(id | 날짜 | 보낸 사람 | 제목 | 요약):");
+  console.log(loose.length ? loose.map((m) => `- ${m.id} | ${m.date} ${m.time} | ${String(m.from || "").split("·")[0].trim()} | ${m.subject} | ${m.oneLine} / ${(m.points || []).slice(0, 3).join(" / ")}`).join("\n") : "(없음)");
 }
 
 // 브리핑·마감 알림용 집계 (data/marks.json 의 체크 기록 반영) -> last-brief.json
@@ -343,7 +342,7 @@ function render() {
   const data = JSON.stringify(mails).replace(/</g, "\\u003c");
   const series = [...seriesGroups().entries()].map(([name, arr]) => ({
     name, items: arr.slice(0, 26).map((m) => ({ id: m.id, date: m.date, time: m.time, subject: m.subject, oneLine: m.oneLine,
-      issue: m.series.issue, changes: m.series.changes || [], points: m.points || [] })),
+      issue: m.series.issue, changes: m.series.changes || [], compared: !!m.series.compared, points: m.points || [] })),
   })).sort((a, b) => (b.items[0].date + b.items[0].time).localeCompare(a.items[0].date + a.items[0].time)); // 가장 최근에 받은 묶음이 위
   const seriesData = JSON.stringify(series).replace(/</g, "\\u003c");
   const inDash = new Set(mails.map((m) => m.id));
@@ -507,7 +506,7 @@ function renderSeries(){
     const lastLabel = (last.issue ? last.issue + " · " : "") + md(last.date);
     const changes = last.changes.length
       ? '<ul class="s-changes">'+last.changes.map(c => '<li>'+esc(c)+'</li>').join("")+'</ul>'
-      : '<span class="hint">'+(n > 1 ? "지난 회차와 달라진 점이 없어요" : "첫 회차라 비교할 이전 기록이 없어요")+'</span>';
+      : '<span class="hint">'+(n === 1 ? "첫 회차라 비교할 이전 기록이 없어요" : last.compared ? "지난 회차와 달라진 점이 없어요" : "이전 회차 정보 없이 요약돼서 비교하지 못했어요")+'</span>';
     const hist = s.items.slice(0, histN).map((it, i) => '<li class="s-item'+(i===0?" now":"")+'"><span class="s-when">'+esc((it.issue ? it.issue + " · " : "") + md(it.date))+'</span>'+
       '<span class="s-body"><span class="s-one">'+esc(it.oneLine)+'</span>'+
       (it.changes.length ? '<span class="s-ch">'+it.changes.map(esc).join(" · ")+'</span>' : '')+
