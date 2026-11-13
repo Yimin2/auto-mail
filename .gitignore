@@ -1,0 +1,27 @@
+# 개인 설정 (그룹웨어 주소·메일함·이름·경로) — 절대 올리지 않음
+config.json
+
+# 메일 내용·요약·대시보드 (개인·회사 정보)
+inbox/
+data/
+dashboard.html
+pending.json
+state.json
+markread.json
+last-*.json
+last-summary.txt
+fail.json
+login-required.flag
+flags/
+
+# 실행 로그·출력
+*.log
+*.out
+*.err
+
+# 디자인 시스템 변환 결과 (tools/make-ds.js 로 다시 만듦)
+ds/
+
+# 로컬 도구
+claude-cli/
+node_modules/

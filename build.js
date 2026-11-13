@@ -1,0 +1,658 @@
+// 메일 요약 데이터 저장 + 대시보드(dashboard.html) 생성 · 웹 공통 디자인 시스템 적용
+//   node build.js ingest <claude출력.txt> <pending.json>   요약 결과를 data/mails.json 에 추가하고 대시보드 생성
+//   node build.js render                                   대시보드만 다시 생성
+const fs = require("fs");
+const path = require("path");
+
+const ROOT = __dirname.replace(/\\/g, "/");
+const CFG = JSON.parse(fs.readFileSync(`${ROOT}/config.json`, "utf8").replace(/^﻿/, "")); // 개인 설정(그룹웨어 주소 등)
+const GW = String(CFG.gwHost || "").replace(/\/$/, "");
+const DATA = `${ROOT}/data/mails.json`;
+const OUT = `${ROOT}/dashboard.html`;
+const DS = `${ROOT}/ds`;
+const KEEP_DAYS = 45;
+
+const readJson = (f, d) => { try { return JSON.parse(fs.readFileSync(f, "utf8").replace(/^\uFEFF/, "")); } catch { return d; } };
+const idOf = (dir) => path.basename(String(dir || "")).replace(/[^\w가-힣-]/g, "_").slice(0, 80);
+
+// 요약은 지우지 않는다: 45일 지난 요약은 data/archive/YYYY-MM.json 으로 옮기고,
+// 아직 할 일이 남아 있을 수 있는 메일(할 일이 있는 메일)은 대시보드에 남긴다.
+// 실제 체크 여부는 브라우저에 있으므로, 할 일이 있는 메일은 180일까지 대시보드에 둔다.
+const ARCHIVE = `${ROOT}/data/archive`;
+const KEEP_TASK_DAYS = 180;
+function archiveOld(list) {
+  const now = Date.now(), keep = [], move = {};
+  const done = (readJson(`${ROOT}/data/marks.json`, {}).done) || {}; // 대시보드 체크 기록(브리핑 때 갱신)
+  for (const m of list) {
+    const age = (now - new Date(m.date || m.addedAt).getTime()) / 86400e3;
+    const hasTask = (m.tasks || []).some((t) => !done[t.id]); // 아직 끝내지 않은 할 일이 있을 때만 오래 둔다
+    if (age < KEEP_DAYS || (hasTask && age < KEEP_TASK_DAYS)) keep.push(m);
+    else (move[String(m.date || m.addedAt).slice(0, 7)] ||= []).push(m);
+  }
+  for (const [ym, ms] of Object.entries(move)) {
+    fs.mkdirSync(ARCHIVE, { recursive: true });
+    const f = `${ARCHIVE}/${ym}.json`;
+    const old = readJson(f, []);
+    const map = new Map(old.map((x) => [x.id, x]));
+    for (const m of ms) map.set(m.id, m);
+    fs.writeFileSync(f, JSON.stringify([...map.values()].sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time)), null, 1), "utf8");
+  }
+  return keep;
+}
+
+function ingest(rawFile, pendingFile) {
+  const raw = fs.readFileSync(rawFile, "utf8").replace(/^\uFEFF/, "");
+  const pending = [].concat(readJson(pendingFile, []));
+  let parsed = null;
+  try {
+    const s = raw.replace(/```(?:json)?/g, "");
+    parsed = JSON.parse(s.slice(s.indexOf("["), s.lastIndexOf("]") + 1));
+    if (!Array.isArray(parsed)) parsed = null;
+  } catch { parsed = null; }
+
+  const mails = readJson(DATA, []);
+  const byId = new Map(mails.map((m) => [m.id, m]));
+  const now = new Date().toISOString();
+  const urlOf = new Map(pending.map((p) => [idOf(p.dir), p.openUrl || null]));
+  const roleOf = new Map(pending.map((p) => [idOf(p.dir), p.role || null]));
+  const kindOf = (t, role) => t.kind === "mine" || t.kind === "watch" ? t.kind : (role && role !== "수신" ? "watch" : "mine");
+  if (parsed) {
+    for (const m of parsed) {
+      const id = idOf(m.dir);
+      byId.set(id, {
+        id, date: m.date, time: m.time, subject: m.subject, from: m.from, url: urlOf.get(id) || m.url || null, dir: m.dir || null,
+        category: m.category === "promo" ? "promo" : "work",
+        importance: ["high", "mid", "low"].includes(m.importance) ? m.importance : "mid",
+        oneLine: m.oneLine || "", points: m.points || [], attachments: m.attachments || [],
+        role: roleOf.get(id) || null,
+        tasks: (m.tasks || []).map((t, i) => ({ id: `${id}#${i}`, text: t.text, due: t.due || null,
+          kind: kindOf(t, roleOf.get(id)), owner: t.owner ? String(t.owner).slice(0, 40) : null, source: t.source && typeof t.source === "object" ? {
+          file: String(t.source.file || "").slice(0, 120) || null, where: t.source.where ? String(t.source.where).slice(0, 60) : null,
+          quote: t.source.quote ? String(t.source.quote).slice(0, 200) : null, why: t.source.why ? String(t.source.why).slice(0, 300) : null } : null })),
+        warning: m.warning || null, addedAt: now,
+        threadNew: (m.threadNew || []).map((c) => String(c).slice(0, 120)).slice(0, 4),
+        series: m.series && m.series.name ? { name: String(m.series.name).slice(0, 40), issue: m.series.issue ? String(m.series.issue).slice(0, 30) : null,
+          changes: (m.series.changes || []).map((c) => String(c).slice(0, 120)).slice(0, 4) } : null,
+      });
+    }
+  } else {
+    // 형식이 깨져도 메일은 남긴다(원문 요약을 그대로 보관)
+    for (const p of pending) {
+      const id = idOf(p.dir);
+      byId.set(id, {
+        id, date: String(p.when || "").slice(0, 10), time: String(p.when || "").slice(11, 16), subject: p.subject, from: p.from, url: p.openUrl || null, dir: p.dir || null,
+        importance: "mid", oneLine: "요약 형식 오류: 아래 원문 참고", points: [raw.trim().slice(0, 1500)], attachments: [],
+        tasks: [], warning: null, addedAt: now,
+      });
+    }
+  }
+  // 반복 메일 소급 묶기: Claude 가 backfill 로 지목한 예전 메일에 같은 묶음 이름을 붙인다
+  if (parsed) for (const m of parsed) {
+    const name = m.series && m.series.name;
+    for (const b of (name && m.series.backfill) || []) {
+      const old = byId.get(b && b.id);
+      if (old && !(old.series && old.series.name)) old.series = { name: String(name).slice(0, 40), issue: b.issue ? String(b.issue).slice(0, 30) : null, changes: [] };
+    }
+  }
+  fs.mkdirSync(path.dirname(DATA), { recursive: true });
+  fs.writeFileSync(DATA, JSON.stringify(archiveOld([...byId.values()]), null, 1), "utf8");
+  // 알림용 요약: 광고(피싱 경고 없는 promo)는 알림에서 뺀다
+  const added = parsed ? parsed.map((m) => byId.get(idOf(m.dir))) : pending.map((p) => byId.get(idOf(p.dir)));
+  const isPromo = (m) => m && m.category === "promo" && !m.warning;
+  fs.writeFileSync(`${ROOT}/last-ingest.json`, JSON.stringify({
+    work: added.filter((m) => m && !isPromo(m)).map((m) => m.subject),
+    promo: added.filter(isPromo).length,
+    tasks: added.filter((m) => m && !isPromo(m)).reduce((n, m) => n + (m.tasks || []).filter((t) => t.kind !== "watch").length, 0),
+  }), "utf8");
+  console.log(parsed ? `ok ${parsed.length}` : "fallback");
+}
+
+// 대화(스레드) 묶음: 제목에서 Re:/RE:/FW:/Fwd:/회신/전달 을 떼고 같은 제목끼리 묶는다 (토큰 사용 없음)
+function threadKey(subject) {
+  let s = String(subject || "");
+  for (let i = 0; i < 20; i++) {
+    const t = s.replace(/^\s*(\[(re|fw|fwd)\]|(re|fw|fwd|회신|답장|전달)\s*(\[\d+\])?\s*:)\s*/i, "");
+    if (t === s) break;
+    s = t;
+  }
+  return s.replace(/\s+/g, " ").trim().toLowerCase();
+}
+const isReply = (subject) => threadKey(subject) !== String(subject || "").replace(/\s+/g, " ").trim().toLowerCase();
+function threadGroups() {
+  const g = new Map();
+  for (const m of allMails()) {
+    if (m.series && m.series.name) continue; // 반복 메일은 반복 메일 칸에서 묶는다
+    const k = threadKey(m.subject);
+    if (!k) continue;
+    if (!g.has(k)) g.set(k, []);
+    g.get(k).push(m);
+  }
+  for (const [k, arr] of g) { if (arr.length < 2) g.delete(k); else arr.sort((a, b) => (b.date + b.time).localeCompare(a.date + a.time)); }
+  return g;
+}
+// 요약 지침에 넣을 "앞선 대화" (이번에 요약할 답장 메일의 이전 메일들)
+function threadContext(pendingFile) {
+  const pending = [].concat(readJson(pendingFile, []));
+  const all = allMails();
+  const out = [];
+  for (const p of pending) {
+    if (!isReply(p.subject)) continue;
+    const k = threadKey(p.subject);
+    const prev = all.filter((m) => threadKey(m.subject) === k).sort((a, b) => (b.date + b.time).localeCompare(a.date + a.time)).slice(0, 4);
+    if (!prev.length) continue;
+    out.push(`- 대상: ${p.dir}\n` + prev.map((m) => `  · ${m.date} ${m.time} ${m.from}: ${m.oneLine} | ${(m.points || []).slice(0, 3).join(" / ")}`).join("\n"));
+  }
+  console.log(out.length ? out.join("\n") : "(없음)");
+}
+
+// 반복 메일 묶음: 대시보드 데이터 + 월별 보관 파일 전체에서 모은다
+function allMails() {
+  const list = [...readJson(DATA, [])];
+  try { for (const f of fs.readdirSync(ARCHIVE)) if (f.endsWith(".json")) list.push(...readJson(`${ARCHIVE}/${f}`, [])); } catch {}
+  return list;
+}
+function seriesGroups() {
+  const g = new Map();
+  for (const m of allMails()) {
+    const name = m.series && m.series.name;
+    if (!name) continue;
+    if (!g.has(name)) g.set(name, []);
+    g.get(name).push(m);
+  }
+  for (const arr of g.values()) arr.sort((a, b) => (b.date + b.time).localeCompare(a.date + a.time));
+  return g;
+}
+// 요약 지침에 넣을 "알고 있는 묶음" (묶음별 직전 회차, 최근 것 20개)
+function seriesContext() {
+  const g = [...seriesGroups().entries()].sort((a, b) => (b[1][0].date + b[1][0].time).localeCompare(a[1][0].date + a[1][0].time)).slice(0, 20);
+  console.log(g.length ? g.map(([name, arr]) => {
+    const m = arr[0];
+    return `- 묶음: ${name} | 직전 회차: ${(m.series && m.series.issue) || m.date} (${m.date}) | ${m.oneLine}\n  핵심: ${(m.points || []).join(" / ")}`;
+  }).join("\n") : "(아직 없음)");
+  // 새 묶음을 만들 때 소급해서 넣을 수 있도록, 최근 30일 동안 묶음 없는 메일 목록도 준다
+  const cut = new Date(Date.now() - 30 * 864e5).toISOString().slice(0, 10);
+  const loose = readJson(DATA, []).filter((m) => !(m.series && m.series.name) && m.date >= cut && m.category !== "promo")
+    .sort((a, b) => (b.date + b.time).localeCompare(a.date + a.time)).slice(0, 40);
+  console.log("\n최근 묶음 없는 메일(id | 날짜 | 보낸 사람 | 제목):");
+  console.log(loose.length ? loose.map((m) => `- ${m.id} | ${m.date} | ${String(m.from || "").split("·")[0].trim()} | ${m.subject}`).join("\n") : "(없음)");
+}
+
+// 브리핑·마감 알림용 집계 (data/marks.json 의 체크 기록 반영) -> last-brief.json
+function brief() {
+  const mails = readJson(DATA, []);
+  const marks = readJson(`${ROOT}/data/marks.json`, { done: {}, flag: {} });
+  const done = marks.done || {}, flag = marks.flag || {};
+  const k = new Date(Date.now() + 9 * 3600e3), today = k.toISOString().slice(0, 10);
+  const work = mails.filter((m) => !(m.category === "promo" && !m.warning));
+  const open = work.flatMap((m) => (m.tasks || []).filter((t) => !done[t.id] && t.kind !== "watch").map((t) => ({ text: t.text, due: t.due, subject: m.subject })));
+  const dueToday = open.filter((t) => t.due === today);
+  const overdue = open.filter((t) => t.due && t.due < today);
+  const week = new Date(Date.now() - 7 * 864e5).toISOString().slice(0, 10);
+  const suspicious = work.filter((m) => m.warning && m.date >= week && !flag[m.id]).length;
+  const res = { today, marksOk: !!marks.ok, open: open.length, dueToday: dueToday.map((t) => t.text), overdue: overdue.map((t) => t.text), suspicious };
+  fs.writeFileSync(`${ROOT}/last-brief.json`, JSON.stringify(res), "utf8");
+  console.log(JSON.stringify(res));
+}
+
+const PAGE_CSS = `
+/* 대시보드 배치 · 값은 모두 디자인 시스템 토큰만 사용 */
+html{-webkit-text-size-adjust:100%}
+body{font-size:16px;line-height:26px}
+.wrap{max-width:960px;margin:0 auto;padding:var(--space-10) var(--space-6) var(--space-16)}
+.top{display:flex;align-items:center;justify-content:space-between;gap:var(--space-4);flex-wrap:wrap;margin-bottom:var(--space-6)}
+.top h1{margin:0;font-size:28px;line-height:36px;font-weight:700;letter-spacing:-0.01em;text-wrap:balance}
+.top .hint{margin:0}
+.stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:var(--space-4);margin-bottom:var(--space-6)}
+.stats .card{padding:var(--space-5) var(--space-6);gap:var(--space-1)}
+.stats .value{font-size:28px;line-height:36px;font-weight:800;font-variant-numeric:tabular-nums}
+.stats .label{display:flex;align-items:center;gap:var(--space-2);font-size:14px;line-height:22px;font-weight:500;color:var(--text-muted)}
+.stats .dot{width:8px;height:8px;border-radius:var(--radius-full);background:var(--border-strong);flex:none}
+.stats .dot.danger{background:var(--danger)}.stats .dot.warning{background:var(--warning)}.stats .dot.brand{background:var(--primary)}
+.alert-row{margin-bottom:var(--space-8)}
+.sec{display:flex;align-items:baseline;gap:var(--space-3);margin:var(--space-8) 0 var(--space-3)}
+.sec h2{margin:0;font-size:22px;line-height:30px;font-weight:700}
+.list{padding:0;gap:0;overflow:hidden}
+.task{display:flex;align-items:center;gap:var(--space-4);padding:var(--space-3) var(--space-6);border-top:1px solid var(--border)}
+.task:first-child{border-top:0}
+.task .check{flex:1;min-width:0;align-items:flex-start;padding:var(--space-2) 0}
+.task .check .box{margin-top:2px}
+.task .txt{display:flex;flex-direction:column;min-width:0}
+.task .what{font-weight:700}
+.task .src{font-size:14px;line-height:22px;color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.task .src a{color:inherit;text-underline-offset:3px}
+.task .src a:hover{color:var(--primary-text)}
+.list{overflow:visible}
+.srcinfo{position:relative;display:inline-flex;align-items:center;gap:var(--space-1);align-self:flex-start;margin-top:var(--space-1);padding:0 var(--space-2);height:28px;border-radius:var(--radius-sm);background:var(--surface-subtle);color:var(--text-muted);font-size:14px;line-height:22px;font-weight:500;cursor:help;max-width:100%}
+.srcinfo .srclabel{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.srcinfo.none{cursor:default;background:none;padding:0}
+.srcinfo:hover,.srcinfo:focus-visible{color:var(--text)}
+.srcinfo .tip{display:none;position:absolute;top:calc(100% + 10px);left:0;z-index:var(--z-tooltip);width:max-content;max-width:min(420px,80vw);text-align:left;white-space:normal;flex-direction:column;gap:var(--space-1);cursor:auto}
+.srcinfo .tip::before,.srcinfo .tip::after{left:24px}
+.srcinfo:hover .tip,.srcinfo:focus-within .tip{display:flex}
+.tip-row{display:flex;gap:var(--space-2);color:var(--text)}
+.tip-row b{flex:none;color:var(--text-muted);font-weight:700}
+.tip-quote{margin-top:var(--space-1);padding:var(--space-2) var(--space-3);border-radius:var(--radius-sm);background:var(--surface-subtle);color:var(--text);font-weight:400}
+.tip-why{color:var(--text-muted);font-weight:400}
+.task .owner{display:inline-flex;align-items:center;margin-left:var(--space-2);padding:0 var(--space-2);height:24px;border-radius:var(--radius-full);border:1px solid var(--border);font-size:12px;line-height:18px;font-weight:700;color:var(--text-muted);vertical-align:middle}
+.task.done .what{font-weight:500;color:var(--text-muted);text-decoration:line-through}
+.task .badge{flex:none}
+.done-acc{margin-top:var(--space-3)}
+.done-acc .body{padding:0}
+.done-acc .task{padding-left:var(--space-5);padding-right:var(--space-5)}
+.day{font-size:14px;line-height:22px;font-weight:700;color:var(--text-muted);margin:var(--space-6) 0 var(--space-2)}
+.mails summary{min-height:auto;padding:var(--space-4) var(--space-5);align-items:flex-start;gap:var(--space-4);font-weight:400}
+.mails .m-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:var(--space-1)}
+.mails .m-head{display:flex;align-items:center;gap:var(--space-3);min-width:0}
+.mails .m-subj{font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.mails .m-one{color:var(--text-muted)}
+.mails .m-tags{display:flex;gap:var(--space-2);flex-wrap:wrap;margin-top:var(--space-1)}
+.mails .m-side{display:flex;align-items:center;gap:var(--space-2);flex:none;color:var(--text-muted);font-size:14px;line-height:22px;font-variant-numeric:tabular-nums;padding-top:var(--space-1)}
+.mails summary>span[aria-hidden]{display:none}
+.mails .m-side .chev{display:inline-block;transition:transform var(--duration-base) var(--ease-out)}
+.mails details[open] .m-side .chev{transform:rotate(180deg)}
+.mails .body{color:var(--text);display:flex;flex-direction:column;gap:var(--space-3)}
+.mails .from{font-size:14px;line-height:22px;color:var(--text-muted)}
+.mails .blk h3{margin:0 0 var(--space-1);font-size:14px;line-height:22px;font-weight:700;color:var(--text-muted)}
+.mails .blk ul{margin:0;padding-left:var(--space-5)}
+.mails .blk li+li{margin-top:var(--space-1)}
+.from-row{display:flex;align-items:center;justify-content:space-between;gap:var(--space-3);flex-wrap:wrap}
+.from-row .btn{text-decoration:none}
+.open-btns{display:flex;align-items:center;gap:var(--space-2);flex-wrap:wrap}
+.series summary{min-height:auto;padding:var(--space-4) var(--space-5);align-items:flex-start;gap:var(--space-4);font-weight:400}
+.series summary>span[aria-hidden]{display:none}
+.series .m-side .chev{display:inline-block;transition:transform var(--duration-base) var(--ease-out)}
+.series details[open] .m-side .chev{transform:rotate(180deg)}
+.series .s-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:var(--space-1)}
+.series .s-head{display:flex;align-items:center;gap:var(--space-3)}
+.series .s-name{font-weight:700}
+.series .s-last{color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.series .s-ch-wrap{display:flex;gap:var(--space-3);align-items:flex-start;margin-top:var(--space-1);padding:var(--space-3) var(--space-4);border-radius:var(--radius-md);background:var(--surface-subtle)}
+.series .s-ch-title{flex:none;font-size:14px;line-height:22px;font-weight:700;color:var(--primary-text)}
+.series .s-changes{margin:0;padding-left:var(--space-5);font-size:14px;line-height:22px;color:var(--text)}
+.series .body{color:var(--text)}
+.series .s-hist-title{margin:0 0 var(--space-2);font-size:14px;line-height:22px;font-weight:700;color:var(--text-muted)}
+.series .s-hist{list-style:none;margin:0;padding:0;border-left:2px solid var(--border)}
+.series .s-item{display:flex;gap:var(--space-4);padding:var(--space-2) 0 var(--space-2) var(--space-4);position:relative}
+.series .s-item::before{content:"";position:absolute;left:-6px;top:15px;width:10px;height:10px;border-radius:var(--radius-full);background:var(--border-strong)}
+.series .s-item.now::before{background:var(--primary)}
+.series .s-when{flex:none;width:120px;font-size:14px;line-height:22px;font-weight:700;color:var(--text-muted);font-variant-numeric:tabular-nums}
+.series .s-body{display:flex;flex-direction:column;min-width:0}
+.series .s-ch{font-size:14px;line-height:22px;color:var(--text-muted)}
+.series .s-link{font-size:14px;line-height:22px;color:var(--primary-text);text-underline-offset:3px;align-self:flex-start}
+.series .s-arch{font-size:14px;line-height:22px;color:var(--text-muted)}
+@media (max-width:767px){.series .s-item{flex-direction:column;gap:0}.series .s-when{width:auto}}
+.t-new{margin:0;padding:var(--space-3) var(--space-4) var(--space-3) var(--space-8);border-radius:var(--radius-md);background:var(--primary-subtle);color:var(--primary-subtle-text)}
+.t-flow{list-style:none;margin:0;padding:0;border-left:2px solid var(--border)}
+.t-flow li{display:flex;gap:var(--space-4);padding:var(--space-2) 0 var(--space-2) var(--space-4);position:relative}
+.t-flow li::before{content:"";position:absolute;left:-6px;top:15px;width:10px;height:10px;border-radius:var(--radius-full);background:var(--border-strong)}
+.t-flow li.now::before{background:var(--primary)}
+.t-when{flex:none;width:96px;font-size:14px;line-height:22px;font-weight:700;color:var(--text-muted);font-variant-numeric:tabular-nums}
+.t-body{display:flex;flex-direction:column;min-width:0}
+.t-sub{font-size:14px;line-height:22px;color:var(--text-muted)}
+@media (max-width:767px){.t-flow li{flex-direction:column;gap:0}.t-when{width:auto}}
+.search{position:relative;margin-bottom:var(--space-6)}
+.search svg{position:absolute;left:var(--space-4);top:50%;transform:translateY(-50%);color:var(--text-muted);pointer-events:none}
+.search .input{padding-left:calc(var(--space-4) + 28px)}
+.more-row{display:flex;justify-content:center;padding:var(--space-2)}
+#searchRes .sec{justify-content:space-between}
+.promo-acc{margin-top:var(--space-8)}
+.promo-acc summary{color:var(--text-muted)}
+.promo-acc .promo-list{padding:0;color:var(--text)}
+.promo-row{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:0 var(--space-4);padding:var(--space-3) var(--space-5);border-top:1px solid var(--border);align-items:baseline}
+.promo-row .p-subj{font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.promo-row .p-from,.promo-row .p-when{font-size:14px;line-height:22px;color:var(--text-muted);white-space:nowrap;font-variant-numeric:tabular-nums}
+.promo-row .p-one{grid-column:1/-1;font-size:14px;line-height:22px;color:var(--text-muted)}
+@media (max-width:767px){.promo-row{grid-template-columns:minmax(0,1fr) auto}.promo-row .p-from{display:none}}
+.flag-actions{display:flex;gap:var(--space-3);flex-wrap:wrap}
+.mails .banner{box-shadow:none}
+.mails .banner .btn{flex:none}
+.tag.neutral{background:var(--surface-subtle);color:var(--text-muted)}
+.empty .hint{max-width:360px}
+.mails details.flash>summary{box-shadow:inset 0 0 0 2px var(--primary)}
+@media (max-width:767px){
+  .wrap{padding:var(--space-6) var(--space-4) var(--space-12)}
+  .top h1{font-size:24px;line-height:34px}
+  .stats{grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--space-3)}
+  .task{padding:var(--space-3) var(--space-4);flex-wrap:wrap;gap:0 var(--space-3)}
+  .task .badge{margin-left:calc(22px + var(--space-3))}
+  .mails summary{padding:var(--space-4)}
+}`;
+
+function render() {
+  const mails = readJson(DATA, []);
+  // 그룹웨어 메일 보기 주소 (포털 wfrmpage 가 메일 문서를 팝업 화면으로 감싸서 보여줌)
+  for (const m of mails) {
+    const unid = (String(m.url || "").match(/\/0\/([0-9A-Fa-f]{32})/) || [])[1];
+    m.gwUrl = unid && CFG.mailViewPath ? GW + CFG.mailViewPath.replace("{mailDb}", CFG.mailDb).replace("{unid}", unid) : null;
+  }
+  const data = JSON.stringify(mails).replace(/</g, "\\u003c");
+  const series = [...seriesGroups().entries()].map(([name, arr]) => ({
+    name, items: arr.slice(0, 26).map((m) => ({ id: m.id, date: m.date, time: m.time, subject: m.subject, oneLine: m.oneLine,
+      issue: m.series.issue, changes: m.series.changes || [], points: m.points || [] })),
+  })).sort((a, b) => (b.items[0].date + b.items[0].time).localeCompare(a.items[0].date + a.items[0].time)); // 가장 최근에 받은 묶음이 위
+  const seriesData = JSON.stringify(series).replace(/</g, "\\u003c");
+  const inDash = new Set(mails.map((m) => m.id));
+  const threads = {};
+  for (const arr of threadGroups().values()) {
+    const latest = arr.find((m) => inDash.has(m.id));
+    if (!latest) continue;
+    threads[latest.id] = arr.slice(0, 30).map((m) => ({ id: m.id, date: m.date, time: m.time, from: m.from, oneLine: m.oneLine, threadNew: m.threadNew || [], here: inDash.has(m.id) }));
+  }
+  const threadData = JSON.stringify(threads).replace(/</g, "\\u003c");
+  const built = new Date(Date.now() + 9 * 3600e3).toISOString().replace("T", " ").slice(0, 16);
+  const ds = ["font.css", "tokens.css", "bundle.css"].map((f) => { try { return fs.readFileSync(`${DS}/${f}`, "utf8"); } catch { return ""; } }).join("\n");
+  fs.writeFileSync(OUT, `<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>메일 할 일</title>
+<style>${ds}</style>
+<style>${PAGE_CSS}</style>
+</head>
+<body><div class="wrap">
+  <header class="top"><h1>메일 할 일</h1><p class="hint">마지막 갱신 ${built}</p></header>
+  <div class="search" role="search"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+    <input id="q" class="input" type="search" placeholder="제목, 보낸 사람, 할 일, 내용으로 찾기 (Ctrl+F)" aria-label="메일 검색" autocomplete="off"></div>
+  <section id="searchRes" style="display:none"><div class="sec"><h2 id="searchSum"></h2><button type="button" class="btn ghost" data-clear="1">검색 지우기</button></div><div id="searchList"></div></section>
+  <div id="main">
+  <section class="stats" id="stats" aria-label="요약"></section>
+  <div class="alert-row" id="alert"></div>
+
+  <div class="sec"><h2>처리할 일</h2><span class="hint" id="taskHint"></span></div>
+  <div class="card list" id="open"></div>
+  <div class="acc done-acc" id="watchWrap"><details><summary><span><span id="watchSum"></span> <span class="hint" style="font-weight:500">· 숫자·알림에는 빠져요</span></span><span aria-hidden="true">⌄</span></summary><div class="body" id="watch"></div></details></div>
+  <div class="acc done-acc" id="doneWrap"><details><summary><span><span id="doneSum"></span> <span class="hint" style="font-weight:500">· 체크 후 7일 동안 보여요</span></span><span aria-hidden="true">⌄</span></summary><div class="body" id="done"></div></details></div>
+
+  <div id="seriesSec"><div class="sec"><h2>반복 메일</h2><span class="hint">같은 종류끼리 묶어 지난번과 달라진 점을 보여 드려요</span></div>
+  <div class="acc series" id="series"></div></div>
+
+  <div class="sec"><h2>받은 메일</h2><span class="hint">눌러서 자세히 보기</span></div>
+  <div id="mails"></div>
+  <div class="acc promo-acc" id="promo"></div>
+  </div>
+</div>
+<script>
+const MAILS = ${data};
+const SERIES = ${seriesData};
+const GW_HOME = ${JSON.stringify(GW + "/")};
+const LATEST = new Set(SERIES.map(s => s.items[0].id)); // 반복 메일은 받은 메일 목록에 최신 회차만
+const THREADS = ${threadData}; // 대화 묶음: 최신 메일 id -> 대화 전체(최신순)
+const OPENMAP = {}; // 목록에서 숨긴 대화 속 메일 -> 최신 메일
+for (const [lid, arr] of Object.entries(THREADS)) for (const it of arr) if (it.id !== lid) OPENMAP[it.id] = lid;
+const store = {
+  get(k){ try { return JSON.parse(localStorage.getItem(k) || "null"); } catch { return null; } },
+  set(k,v){ try { localStorage.setItem(k, JSON.stringify(v)); } catch {} }
+};
+const doneMap = store.get("gwmail.done") || {};
+const flagMap = store.get("gwmail.flag") || {}; // 의심 메일 판정: { [메일id]: { v: "safe" | "danger", at } }
+const flagOf = m => (m.warning && flagMap[m.id]) ? flagMap[m.id].v : null;
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const pad = n => String(n).padStart(2,"0");
+const today = (() => { const d = new Date(); return d.getFullYear()+"-"+pad(d.getMonth()+1)+"-"+pad(d.getDate()); })();
+const dayDiff = d => Math.round((new Date(d+"T00:00:00") - new Date(today+"T00:00:00")) / 86400000);
+const WD = ["일","월","화","수","목","금","토"];
+const md = d => d.slice(5).replace("-","/");
+const ICON = {
+  clip: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 11.5l-8.5 8.5a5 5 0 0 1-7-7L14 4.5a3.3 3.3 0 0 1 4.7 4.7L10.2 17.7a1.7 1.7 0 0 1-2.4-2.4L15.5 7.6"/></svg>',
+  mail: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 7l9 6 9-6"/></svg>',
+  warn: '<svg class="ic" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l10 18H2z"/><path d="M12 10v5M12 18.5v.01"/></svg>',
+  check: '<svg class="ic" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M8 12.5l2.7 2.7L16 9.8"/></svg>',
+  clock: '<svg class="ic" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>',
+  done: '<svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--border-strong)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M8 12.5l2.7 2.7L16 9.8"/></svg>',
+  inbox: '<svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--border-strong)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 13l3-8h12l3 8v6H3z"/><path d="M3 13h5l1 2h6l1-2h5"/></svg>'
+};
+function dueBadge(due){
+  if(!due) return '<span class="badge"><span class="dot"></span>기한 없음</span>';
+  const n = dayDiff(due), wd = WD[new Date(due+"T00:00:00").getDay()];
+  if(n < 0) return '<span class="badge danger"><span class="dot"></span>'+(-n)+'일 지남</span>';
+  if(n === 0) return '<span class="badge danger"><span class="dot"></span>오늘까지</span>';
+  if(n === 1) return '<span class="badge warning"><span class="dot"></span>내일까지</span>';
+  if(n <= 3) return '<span class="badge warning"><span class="dot"></span>'+md(due)+'('+wd+')</span>';
+  return '<span class="badge"><span class="dot"></span>'+md(due)+'('+wd+')</span>';
+}
+const imp = {high:0, mid:1, low:2};
+const isPromo = m => m.category === "promo" && !m.warning;
+const WORK = MAILS.filter(m => !isPromo(m)), PROMO = MAILS.filter(isPromo);
+const tasks = WORK.flatMap(m => (m.tasks||[]).map(t => ({...t, mail:m})));
+const DONE_KEEP_DAYS = 7;
+const WATCH_HIDE_AFTER_DAYS = 3; // 마감이 3일 지난 지켜볼 일은 숨김(내 일이 아니므로)
+// 칸별로 처음 보여 줄 개수 ("더 보기"로 늘어남)
+const SHOW = { open: 10, watch: 10, series: 5, hist: {}, mailDays: 3, promo: 20 };
+const moreBtn = (key, left, label) => left > 0 ? '<div class="more-row"><button type="button" class="btn ghost" data-more="'+esc(key)+'">'+(label || (left+"개 더 보기"))+'</button></div>' : '';
+function srcInfo(s){
+  if(!s || !s.file) return '<span class="srcinfo none">근거 위치 정보 없음</span>';
+  const isBody = s.file === "메일 본문";
+  const label = (isBody ? "메일 본문" : s.file) + (s.where ? " · " + s.where : "");
+  const tip = '<span class="tip below" role="tooltip">'+
+    '<span class="tip-row"><b>파일</b>'+esc(s.file)+'</span>'+
+    (s.where ? '<span class="tip-row"><b>위치</b>'+esc(s.where)+'</span>' : '')+
+    (s.quote ? '<span class="tip-quote">“'+esc(s.quote)+'”</span>' : '')+
+    (s.why ? '<span class="tip-why">'+esc(s.why)+'</span>' : '')+
+    '</span>';
+  return '<span class="srcinfo" tabindex="0">'+(isBody ? ICON.mail : ICON.clip)+'<span class="srclabel">'+esc(label)+'</span>'+tip+'</span>';
+}
+function taskRow(t){
+  const done = !!doneMap[t.id];
+  const who = (t.mail.from||"").split("·")[0].trim();
+  const owner = t.kind === "watch" ? '<span class="owner">담당 '+esc(t.owner || "미정")+'</span>' : '';
+  return '<div class="task'+(done?" done":"")+(t.kind === "watch" ? " watch" : "")+'"><label class="check"><input type="checkbox" class="box" data-id="'+esc(t.id)+'"'+(done?" checked":"")+'>'+
+    '<span class="txt"><span class="what">'+esc(t.text)+owner+'</span><span class="src"><a href="#'+esc(t.mail.id)+'" data-open="'+esc(t.mail.id)+'">'+esc(t.mail.subject)+'</a> · '+esc(who)+'</span>'+srcInfo(t.source)+'</span></label>'+
+    (done ? '<span class="badge success"><span class="dot"></span>'+esc(md(String(doneMap[t.id]).slice(0,10)))+' 완료</span>' : dueBadge(t.due))+'</div>';
+}
+function render(){
+  const byDue = (a,b) => {
+    const da = a.due || "9999-99-99", db = b.due || "9999-99-99";
+    return da < db ? -1 : da > db ? 1 : imp[a.mail.importance] - imp[b.mail.importance];
+  };
+  const open = tasks.filter(t => !doneMap[t.id] && t.kind !== "watch").sort(byDue);
+  const watch = tasks.filter(t => !doneMap[t.id] && t.kind === "watch" && !(t.due && dayDiff(t.due) < -WATCH_HIDE_AFTER_DAYS)).sort(byDue);
+  const doneCut = Date.now() - DONE_KEEP_DAYS*864e5; // 완료한 일은 체크 후 7일만 보여요
+  const done = tasks.filter(t => doneMap[t.id] && new Date(doneMap[t.id]).getTime() >= doneCut).sort((a,b) => String(doneMap[b.id]).localeCompare(String(doneMap[a.id])));
+  const wbox = document.getElementById("watchWrap");
+  wbox.style.display = watch.length ? "" : "none";
+  document.getElementById("watchSum").textContent = "지켜볼 일 · 참조 메일 "+watch.length+"개";
+  document.getElementById("watch").innerHTML = watch.slice(0, SHOW.watch).map(taskRow).join("") + moreBtn("watch", watch.length - SHOW.watch);
+  const dueToday = open.filter(t => t.due && dayDiff(t.due) <= 0);
+  const dueSoon = open.filter(t => t.due && dayDiff(t.due) === 1);
+  const todayMails = WORK.filter(m => m.date === today).length;
+  const week = new Date(Date.now() - 7*864e5).toISOString().slice(0,10);
+  const warns = MAILS.filter(m => m.warning && m.date >= week && !flagOf(m));
+  const stat = (v, label, dot) => '<div class="card"><span class="value">'+v+'</span><span class="label"><span class="dot '+dot+'"></span>'+label+'</span></div>';
+  document.getElementById("stats").innerHTML =
+    stat(open.length, "남은 할 일", "brand") +
+    stat(dueToday.length + dueSoon.length, "오늘·내일 마감", (dueToday.length ? "danger" : dueSoon.length ? "warning" : "")) +
+    stat(todayMails, "오늘 받은 메일", "") +
+    stat(warns.length, "확인할 의심 메일", warns.length ? "danger" : "");
+
+  let alert = "";
+  if(dueToday.length) alert += '<div class="banner danger" role="alert">'+ICON.clock+'<div class="txt"><strong>오늘 마감인 일이 '+dueToday.length+'개 있어요</strong>'+esc(dueToday.map(t => t.text).join(" · "))+'</div></div>';
+  if(warns.length) alert += '<div class="banner warning" role="status" style="margin-top:var(--space-3)">'+ICON.warn+'<div class="txt"><strong>확인이 필요한 의심 메일이 '+warns.length+'통 있어요</strong>열어 보고 의심 해제 또는 위험으로 표시해 주세요. '+esc(warns.map(m => m.subject).join(" · "))+'</div><a class="act" href="#'+esc(warns[0].id)+'" data-open="'+esc(warns[0].id)+'">확인하기</a></div>';
+  document.getElementById("alert").innerHTML = alert;
+  document.getElementById("alert").style.display = alert ? "" : "none";
+
+  document.getElementById("taskHint").textContent = open.length ? "마감이 가까운 순서예요. 끝낸 일은 체크하세요." : "";
+  document.getElementById("open").innerHTML = open.length ? open.slice(0, SHOW.open).map(taskRow).join("") + moreBtn("open", open.length - SHOW.open) :
+    '<div class="empty">'+ICON.done+'<b style="font-size:18px">남은 할 일이 없어요</b><span class="hint">새 메일에서 할 일이 생기면 여기에 바로 보여 드릴게요.</span></div>';
+  document.getElementById("doneWrap").style.display = done.length ? "" : "none";
+  document.getElementById("doneSum").textContent = "완료한 일 "+done.length+"개";
+  document.getElementById("done").innerHTML = done.map(taskRow).join("");
+}
+function renderSeries(){
+  const box = document.getElementById("seriesSec");
+  box.style.display = SERIES.length ? "" : "none";
+  if(!SERIES.length) return;
+  const openNow = new Set([...document.querySelectorAll("#series details[open]")].map(d => d.dataset.name));
+  document.getElementById("series").innerHTML = SERIES.slice(0, SHOW.series).map(s => {
+    const last = s.items[0], n = s.items.length, histN = SHOW.hist[s.name] || 10;
+    const lastLabel = (last.issue ? last.issue + " · " : "") + md(last.date);
+    const changes = last.changes.length
+      ? '<ul class="s-changes">'+last.changes.map(c => '<li>'+esc(c)+'</li>').join("")+'</ul>'
+      : '<span class="hint">'+(n > 1 ? "지난 회차와 달라진 점이 없어요" : "첫 회차라 비교할 이전 기록이 없어요")+'</span>';
+    const hist = s.items.slice(0, histN).map((it, i) => '<li class="s-item'+(i===0?" now":"")+'"><span class="s-when">'+esc((it.issue ? it.issue + " · " : "") + md(it.date))+'</span>'+
+      '<span class="s-body"><span class="s-one">'+esc(it.oneLine)+'</span>'+
+      (it.changes.length ? '<span class="s-ch">'+it.changes.map(esc).join(" · ")+'</span>' : '')+
+      (i === 0 && MAILS.some(m => m.id === it.id) ? '<a href="#'+esc(it.id)+'" data-open="'+esc(it.id)+'" class="s-link">받은 메일에서 자세히 보기</a>'
+        : (it.points.length ? '<span class="s-ch">'+it.points.slice(0, 3).map(esc).join(" · ")+'</span>' : ''))+
+      '</span></li>').join("");
+    return '<details data-name="'+esc(s.name)+'"'+(openNow.has(s.name)?" open":"")+'><summary><span class="s-main">'+
+      '<span class="s-head"><span class="s-name">'+esc(s.name)+'</span><span class="badge brand"><span class="dot"></span>'+n+'회차</span></span>'+
+      '<span class="s-last">최근 '+esc(lastLabel)+' · '+esc(last.oneLine)+'</span>'+
+      '<span class="s-ch-wrap"><span class="s-ch-title">지난번 대비</span>'+changes+'</span>'+
+      '</span><span class="m-side"><span class="chev" aria-hidden="true">⌄</span></span><span aria-hidden="true"></span></summary>'+
+      '<div class="body"><h3 class="s-hist-title">회차별 기록</h3><ol class="s-hist">'+hist+'</ol>'+moreBtn("hist:"+s.name, n - histN, "이전 회차 "+(n - histN)+"개 더 보기")+'</div></details>';
+  }).join("") + moreBtn("series", SERIES.length - SHOW.series, "반복 메일 묶음 "+(SERIES.length - SHOW.series)+"개 더 보기");
+}
+function warnBlock(m, fl, wTitle){
+  const why = esc(m.warning.split(":").slice(1).join(":").trim());
+  const when = fl ? esc(md(String(flagMap[m.id].at).slice(0,10))) : "";
+  if(fl === "safe") return '<div class="banner success" role="status">'+ICON.check+'<div class="txt"><strong>의심을 해제했어요 · '+when+'</strong>AI 판단: '+esc(wTitle)+(why?' — '+why:'')+'</div>'+
+    '<button type="button" class="btn ghost" data-flag="'+esc(m.id)+'" data-v="">되돌리기</button></div>';
+  if(fl === "danger") return '<div class="banner danger" role="alert">'+ICON.warn+'<div class="txt"><strong>위험 메일로 표시했어요 · '+when+'</strong>링크를 누르거나 코드를 입력하지 마세요. 정보보안 담당자에게 신고하면 좋아요.</div>'+
+    '<button type="button" class="btn ghost" data-flag="'+esc(m.id)+'" data-v="">되돌리기</button></div>';
+  return '<div class="banner warning" role="alert">'+ICON.warn+'<div class="txt"><strong>'+esc(wTitle)+' · 확인이 필요해요</strong>'+why+'</div></div>'+
+    '<div class="flag-actions"><button type="button" class="btn outline" data-flag="'+esc(m.id)+'" data-v="safe">의심 해제하기</button>'+
+    '<button type="button" class="btn danger" data-flag="'+esc(m.id)+'" data-v="danger">위험으로 표시하기</button></div>';
+}
+const LV = {high:['danger','중요'], mid:['warning','보통'], low:['','참고']};
+function mailItem(m, prefix){
+  const [cls, txt] = LV[m.importance] || LV.mid;
+  const tags = [];
+  const th = THREADS[m.id];
+  if(th) tags.push('<span class="tag neutral">대화 '+th.length+'통</span>');
+  if(m.series && m.series.name) tags.push('<span class="tag neutral">'+esc(m.series.name)+(m.series.issue ? ' · '+esc(m.series.issue) : '')+'</span>');
+  if((m.tasks||[]).length) tags.push('<span class="tag">할 일 '+m.tasks.length+'</span>');
+  if((m.attachments||[]).length) tags.push('<span class="tag neutral">첨부 '+m.attachments.length+'</span>');
+  const fl = flagOf(m), wTitle = m.warning ? m.warning.split(":")[0] : "";
+  if(m.warning) tags.push(
+    fl === "safe" ? '<span class="badge success"><span class="dot"></span>의심 해제</span>' :
+    fl === "danger" ? '<span class="badge danger"><span class="dot"></span>위험 메일</span>' :
+    '<span class="badge warning"><span class="dot"></span>'+esc(wTitle)+' · 확인 필요</span>');
+  const blk = (title, arr) => arr && arr.length ? '<div class="blk"><h3>'+title+'</h3><ul>'+arr.map(x => '<li>'+x+'</li>').join("")+'</ul></div>' : "";
+  return '<details id="'+esc((prefix || "")+m.id)+'"><summary>'+
+    '<span class="m-main"><span class="m-head"><span class="badge '+cls+'"><span class="dot"></span>'+txt+'</span><span class="m-subj">'+esc(m.subject)+'</span></span>'+
+    '<span class="m-one">'+esc(m.oneLine)+'</span>'+(tags.length?'<span class="m-tags">'+tags.join("")+'</span>':"")+'</span>'+
+    '<span class="m-side">'+(prefix ? esc(md(m.date))+' ' : '')+esc(m.time)+'<span class="chev" aria-hidden="true">⌄</span></span><span aria-hidden="true"></span>'+
+    '</summary><div class="body"><div class="from-row"><span class="from">보낸 사람 · '+esc(m.from)+'</span>'+
+    '<span class="open-btns">'+
+    '<a class="btn outline" href="'+esc(m.gwUrl || GW_HOME)+'" target="_blank" rel="noopener">'+(m.gwUrl ? "그룹웨어에서 열기" : "그룹웨어 열기")+'</a></span></div>'+
+    (m.warning ? warnBlock(m, fl, wTitle) : "")+
+    blk("할 일", (m.tasks||[]).map(t => esc(t.text)+(t.due?' · '+esc(md(t.due))+'까지':"")+(t.kind === "watch" ? ' · 지켜볼 일(담당 '+esc(t.owner || "미정")+')' : '')+'<br>'+srcInfo(t.source))) +
+    ((m.threadNew||[]).length ? '<div class="blk"><h3>이번 답장에서 새로 나온 내용</h3><ul class="t-new">'+m.threadNew.map(x => '<li>'+esc(x)+'</li>').join("")+'</ul></div>' : '') +
+    blk("핵심 내용", (m.points||[]).map(esc)) +
+    (th ? '<div class="blk"><h3>대화 흐름 · '+th.length+'통</h3><ol class="t-flow">'+th.map((it, i) =>
+      '<li class="'+(i===0?"now":"")+'"><span class="t-when">'+esc(md(it.date))+' '+esc(it.time)+'</span><span class="t-body"><b>'+esc((it.from||"").split("·")[0].trim())+'</b> '+esc(it.oneLine)+
+      (it.threadNew.length ? '<span class="t-sub">새 내용: '+it.threadNew.map(esc).join(" · ")+'</span>' : '')+
+      (it.here ? '' : '<span class="t-sub">월별 보관 파일에 있어요</span>')+'</span></li>').join("")+'</ol></div>' : '') +
+    blk("첨부", (m.attachments||[]).map(esc)) +
+    '</div></details>';
+}
+function dayLabel(date){
+  const n = dayDiff(date);
+  return (n===0?"오늘 · ":n===-1?"어제 · ":"") + date.replace(/-/g,".") + " ("+WD[new Date(date+"T00:00:00").getDay()]+")";
+}
+function listMails(){
+  const recent = new Date(Date.now() - ${KEEP_DAYS}*864e5).toISOString().slice(0,10);
+  return WORK.filter(m => !(m.series && m.series.name && !LATEST.has(m.id)) && !OPENMAP[m.id])
+    .filter(m => m.date >= recent || (m.tasks||[]).some(t => !doneMap[t.id])).sort((a,b) => (b.date+b.time).localeCompare(a.date+a.time));
+}
+function renderMails(){
+  const sorted = listMails();
+  const shown = sorted.filter(m => dayDiff(m.date) > -SHOW.mailDays);
+  const left = sorted.length - shown.length;
+  const groups = [];
+  for(const m of shown){ const g = groups[groups.length-1]; if(g && g.date === m.date) g.items.push(m); else groups.push({date:m.date, items:[m]}); }
+  const html = groups.map(g => '<div class="day">'+dayLabel(g.date)+'</div><div class="acc mails">'+g.items.map(m => mailItem(m)).join("")+'</div>').join("");
+  document.getElementById("mails").innerHTML = (html ||
+    '<div class="card"><div class="empty">'+ICON.inbox+'<b style="font-size:18px">최근 '+SHOW.mailDays+'일 동안 받은 메일이 없어요</b><span class="hint">새 메일이 오면 1분 안에 요약해서 여기에 보여 드릴게요.</span></div></div>') +
+    moreBtn("mail", left, "지난 메일 더 보기 · "+left+"통");
+
+  const promoBox = document.getElementById("promo");
+  promoBox.style.display = PROMO.length ? "" : "none";
+  if(PROMO.length){
+    const ps = [...PROMO].sort((a,b) => (b.date+b.time).localeCompare(a.date+a.time));
+    const wasOpen = promoBox.querySelector("details")?.open;
+    promoBox.innerHTML = '<details'+(wasOpen?" open":"")+'><summary><span>광고·뉴스레터 '+ps.length+'통 <span class="hint" style="font-weight:500">· 알림 없이 모아 둬요</span></span><span aria-hidden="true">⌄</span></summary><div class="body promo-list">'+
+      ps.slice(0, SHOW.promo).map(m => '<div class="promo-row"><span class="p-subj">'+esc(m.subject)+'</span><span class="p-from">'+esc((m.from||"").split("·")[0].trim())+'</span><span class="p-when">'+esc(md(m.date))+' '+esc(m.time)+'</span>'+
+        (m.oneLine ? '<span class="p-one">'+esc(m.oneLine)+'</span>' : "")+'</div>').join("")+moreBtn("promo", ps.length - SHOW.promo)+'</div></details>';
+  }
+}
+// 검색: 제목·보낸 사람·한 줄 요약·핵심 내용·할 일·첨부·묶음 이름 (대시보드에 있는 메일 전체, 광고 포함)
+function haystack(m){
+  return [m.subject, m.from, m.oneLine, (m.points||[]).join(" "), (m.attachments||[]).join(" "), (m.tasks||[]).map(t => t.text + " " + (t.owner||"") + " " + ((t.source && t.source.quote) || "")).join(" "),
+    (m.series && m.series.name) || "", (m.threadNew||[]).join(" ")].join(" ").toLowerCase();
+}
+function renderSearch(){
+  const q = document.getElementById("q").value.trim().toLowerCase();
+  const res = document.getElementById("searchRes"), main = document.getElementById("main");
+  if(!q){ res.style.display = "none"; main.style.display = ""; return; }
+  const words = q.split(" ").filter(Boolean);
+  const hits = MAILS.filter(m => { const h = haystack(m); return words.every(w => h.includes(w)); })
+    .sort((a,b) => (b.date+b.time).localeCompare(a.date+a.time));
+  main.style.display = "none"; res.style.display = "";
+  document.getElementById("searchSum").textContent = "“"+q+"” 검색 결과 "+hits.length+"통";
+  document.getElementById("searchList").innerHTML = hits.length
+    ? '<div class="acc mails">'+hits.slice(0, 50).map(m => mailItem(m, "s-")).join("")+'</div>'+(hits.length > 50 ? '<p class="hint">결과가 많아 최근 50통만 보여 드려요. 검색어를 더 붙여 보세요.</p>' : '')
+    : '<div class="card"><div class="empty">'+ICON.inbox+'<b style="font-size:18px">찾는 메일이 없어요</b><span class="hint">대시보드에 남아 있는 최근 메일에서만 찾아요. 45일 지난 메일은 월별 보관 파일에 있어요.</span></div></div>';
+}
+document.addEventListener("change", e => {
+  const id = e.target.dataset && e.target.dataset.id; if(!id) return;
+  if(e.target.checked) doneMap[id] = new Date().toISOString(); else delete doneMap[id];
+  store.set("gwmail.done", doneMap); render();
+});
+document.getElementById("q").addEventListener("input", renderSearch);
+document.addEventListener("keydown", e => {
+  const q = document.getElementById("q");
+  // Ctrl+F: 대시보드 검색창으로 (검색창에 있을 때 한 번 더 누르면 브라우저 기본 찾기)
+  if((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "f" && document.activeElement !== q){
+    e.preventDefault(); q.focus(); q.select(); window.scrollTo({ top: 0, behavior: "auto" });
+  }
+  if(e.key === "Escape" && document.activeElement === q && q.value){ q.value = ""; renderSearch(); }
+});
+document.addEventListener("click", e => {
+  if(e.target.closest(".srcinfo") && !e.target.closest("a")){ e.preventDefault(); return; } // 근거 칩을 눌러도 체크되지 않게
+  if(e.target.closest("[data-clear]")){ const q = document.getElementById("q"); q.value = ""; renderSearch(); q.focus(); return; }
+  const mo = e.target.closest("[data-more]");
+  if(mo){
+    e.preventDefault();
+    const k = mo.dataset.more;
+    if(k === "open") SHOW.open += 20;
+    else if(k === "watch") SHOW.watch += 20;
+    else if(k === "series") SHOW.series += 10;
+    else if(k === "promo") SHOW.promo += 30;
+    else if(k === "mail") SHOW.mailDays += 7;
+    else if(k.indexOf("hist:") === 0){ const n = k.slice(5); SHOW.hist[n] = (SHOW.hist[n] || 10) + 20; }
+    render(); renderSeries(); renderMails();
+    return;
+  }
+  const f = e.target.closest("[data-flag]");
+  if(f){
+    e.preventDefault();
+    const id = f.dataset.flag;
+    if(f.dataset.v) flagMap[id] = { v: f.dataset.v, at: new Date().toISOString() }; else delete flagMap[id];
+    store.set("gwmail.flag", flagMap);
+    render(); renderMails();
+    const d = document.getElementById(id); if(d) d.open = true;
+    return;
+  }
+  const a = e.target.closest("[data-open]"); if(!a) return;
+  e.preventDefault();
+  const target = OPENMAP[a.dataset.open] || a.dataset.open;
+  if(document.getElementById("searchRes").style.display !== "none"){ document.getElementById("q").value = ""; renderSearch(); }
+  let d = document.getElementById(target);
+  if(!d){ // "지난 메일 더 보기"에 가려진 메일이면 그 날짜까지 펼친다
+    const m = MAILS.find(x => x.id === target);
+    if(m){ SHOW.mailDays = Math.max(SHOW.mailDays, 1 - dayDiff(m.date)); renderMails(); d = document.getElementById(target); }
+  }
+  if(!d) return;
+  d.open = true; d.scrollIntoView({behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block:"center"});
+  d.classList.add("flash"); setTimeout(() => d.classList.remove("flash"), 1600);
+});
+render(); renderSeries(); renderMails();
+</script></body></html>`, "utf8");
+  console.log("rendered " + mails.length);
+}
+
+const [, , cmd, a1, a2] = process.argv;
+if (cmd === "ingest") { ingest(a1, a2); render(); }
+else if (cmd === "brief") brief();
+else if (cmd === "series-context") seriesContext();
+else if (cmd === "thread-context") threadContext(a1);
+else render();

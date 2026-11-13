@@ -1,0 +1,218 @@
+// 그룹웨어(Domino) 새 메일 수집기 (ego-browser nodejs 로 실행, 토큰 사용 없음)
+// - 개인 설정(그룹웨어 주소·메일함·내 이름 등)은 같은 폴더의 config.json 에서 읽습니다.
+// - 받은 편지함 API에서 처리하지 않은 메일을 찾아 inbox/<날짜>_<제목>/ 에
+//   mail.md(본문)와 첨부파일을 저장하고, office 첨부는 텍스트(.txt)도 뽑아 둡니다.
+// - 새 메일 폴더는 pending.json 대기열에 추가 → run.ps1 이 요약 후 첨부를 지웁니다.
+// - ego 브라우저의 "gw-mail-collector" 작업 공간 탭 하나를 계속 재사용합니다.
+// - 마지막 줄에 RESULT_JSON=... 으로 결과를 출력합니다.
+
+const fs = await import("node:fs/promises");
+const path = await import("node:path");
+const zlib = await import("node:zlib");
+
+const { fileURLToPath } = await import("node:url");
+const ROOT = fileURLToPath(new URL(".", import.meta.url)).replace(/\\/g, "/").replace(/\/$/, "");
+const CFG = JSON.parse((await fs.readFile(`${ROOT}/config.json`, "utf8")).replace(/^﻿/, ""));
+const STATE = `${ROOT}/state.json`;
+const PENDING = `${ROOT}/pending.json`;
+const INBOX_DIR = `${ROOT}/inbox`;
+const GW = CFG.gwHost.replace(/\/$/, "");
+const MAILDB = CFG.mailDb;
+const FIRST_RUN_LOOKBACK_HOURS = 24;
+
+const ATTACH_EXT_OK = /\.(pdf|docx?|xlsx?|pptx?|hwpx?|txt|csv|png|jpe?g)$/i;
+const ATTACH_MAX_BYTES = 30 * 1024 * 1024;
+
+// ---------- MIME / HTML ----------
+function decodeQP(s) {
+  const bytes = [];
+  const str = s.replace(/=\r?\n/g, "");
+  for (let i = 0; i < str.length; i++) {
+    if (str[i] === "=" && /^[0-9A-F]{2}$/i.test(str.substr(i + 1, 2))) {
+      bytes.push(parseInt(str.substr(i + 1, 2), 16)); i += 2;
+    } else bytes.push(...Buffer.from(str[i], "utf8"));
+  }
+  return Buffer.from(bytes).toString("utf8");
+}
+function htmlToText(h) {
+  return h
+    .replace(/<style[\s\S]*?<\/style>/gi, "").replace(/<script[\s\S]*?<\/script>/gi, "")
+    .replace(/<br\s*\/?>/gi, "\n").replace(/<\/(p|div|tr|li|h\d)>/gi, "\n").replace(/<\/t[dh]>/gi, "\t")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&nbsp;/g, " ").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, "&")
+    .replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+function bodyText(body) {
+  if (!body) return "";
+  if (typeof body === "string") return htmlToText(body);
+  const parts = body.content || [];
+  const decode = (p) => {
+    const enc = (p.contentTransferEncoding || "").toLowerCase();
+    if (enc === "base64") return Buffer.from(p.data || "", "base64").toString("utf8");
+    if (enc === "quoted-printable") return decodeQP(p.data || "");
+    return p.data || "";
+  };
+  const plain = parts.find((p) => /^text\/plain/i.test(p.contentType || "") && p.data);
+  if (plain) return decode(plain).trim();
+  const html = parts.find((p) => /^text\/html/i.test(p.contentType || "") && p.data);
+  return html ? htmlToText(decode(html)) : "";
+}
+
+// ---------- office(zip) 텍스트 추출 ----------
+function unzipEntries(buf) {
+  const out = {};
+  let eocd = -1;
+  for (let i = buf.length - 22; i >= Math.max(0, buf.length - 66000); i--) if (buf.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
+  if (eocd < 0) return out;
+  const count = buf.readUInt16LE(eocd + 10);
+  let p = buf.readUInt32LE(eocd + 16);
+  for (let n = 0; n < count; n++) {
+    if (buf.readUInt32LE(p) !== 0x02014b50) break;
+    const method = buf.readUInt16LE(p + 10), csize = buf.readUInt32LE(p + 20);
+    const nlen = buf.readUInt16LE(p + 28), elen = buf.readUInt16LE(p + 30), clen = buf.readUInt16LE(p + 32);
+    const local = buf.readUInt32LE(p + 42);
+    const name = buf.slice(p + 46, p + 46 + nlen).toString("utf8");
+    const dataStart = local + 30 + buf.readUInt16LE(local + 26) + buf.readUInt16LE(local + 28);
+    const raw = buf.slice(dataStart, dataStart + csize);
+    try { out[name] = method === 8 ? zlib.inflateRawSync(raw) : raw; } catch {}
+    p += 46 + nlen + elen + clen;
+  }
+  return out;
+}
+const xmlText = (x, tag) => [...x.toString("utf8").matchAll(new RegExp(`<${tag}(?: [^>]*)?>([^<]*)</${tag}>`, "g"))].map((m) => m[1])
+  .map((s) => s.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, "&"));
+function officeText(file, buf) {
+  const z = unzipEntries(buf);
+  const num = (s) => Number((s.match(/(\d+)\.xml$/) || [, 0])[1]);
+  if (/\.pptx$/i.test(file)) {
+    return Object.keys(z).filter((k) => /^ppt\/slides\/slide\d+\.xml$/.test(k)).sort((a, b) => num(a) - num(b))
+      .map((k) => `## 슬라이드 ${num(k)}\n` + xmlText(z[k].toString("utf8").replace(/<\/a:p>/g, "<a:t>\n</a:t>"), "a:t").join("")).join("\n\n");
+  }
+  if (/\.docx$/i.test(file) && z["word/document.xml"]) {
+    return xmlText(z["word/document.xml"].toString("utf8").replace(/<\/w:p>/g, "<w:t>\n</w:t>"), "w:t").join("");
+  }
+  if (/\.xlsx$/i.test(file)) {
+    const shared = z["xl/sharedStrings.xml"] ? xmlText(z["xl/sharedStrings.xml"], "t") : [];
+    return Object.keys(z).filter((k) => /^xl\/worksheets\/sheet\d+\.xml$/.test(k)).sort((a, b) => num(a) - num(b)).map((k) => {
+      const rows = [...z[k].toString("utf8").matchAll(/<row[^>]*>([\s\S]*?)<\/row>/g)].map((r) =>
+        [...r[1].matchAll(/<c([^>]*)>(?:[\s\S]*?<v>([^<]*)<\/v>)?[\s\S]*?<\/c>/g)].map((c) => (/t="s"/.test(c[1]) ? shared[Number(c[2])] : c[2]) ?? "").join("\t"));
+      return `## 시트 ${num(k)}\n` + rows.join("\n");
+    }).join("\n\n");
+  }
+  return null;
+}
+
+// ---------- 공통 ----------
+const lang = (v) => (String(v || "").match(/ko:([^,]*)/) || [, String(v || "")])[1];
+const cn = (v) => (Array.isArray(v) ? v : v ? [v] : []).map((x) => String(x).replace(/^CN=([^/]+).*$/, "$1"));
+const safe = (s) => String(s).replace(/[\\/:*?"<>|\r\n\t]/g, "_").slice(0, 60).replace(/[. ]+$/, "").trim() || "_";
+const kst = (iso) => new Date(new Date(iso).getTime() + 9 * 3600e3).toISOString().replace("T", " ").slice(0, 16);
+const readJson = async (f, d) => { try { return JSON.parse(await fs.readFile(f, "utf8")); } catch { return d; } };
+
+let state = await readJson(STATE, { seen: [], initializedAt: null });
+const firstRun = !state.initializedAt;
+const seen = new Set(state.seen);
+const result = { ok: true, loginRequired: false, newMails: [] };
+
+const task = await taskSpace("gw-mail-collector");
+let page = (await task.pages())[0];
+if (!page) page = await task.newPage();
+
+try {
+  // 세션 유지: 그룹웨어 탭이 아니거나 마지막 새로고침 후 15분이 지났으면 첫 화면을 다시 연다
+  const KEEPALIVE_MS = 15 * 60e3;
+  const lastReload = state.lastReloadAt ? new Date(state.lastReloadAt).getTime() : 0;
+  if (!String(await page.url()).startsWith(GW) || Date.now() - lastReload > KEEPALIVE_MS) {
+    await page.goto(GW + "/", { timeout: 60000 });
+    state.lastReloadAt = new Date().toISOString();
+  }
+  let list = await page.fetch(`${MAILDB}/api/data/collections/name/($inbox_all_portal)?ps=40&page=0`, { timeout: 30000 });
+  let entries; try { entries = JSON.parse(list.body); } catch { entries = null; }
+  if (!Array.isArray(entries)) { // 세션 갱신 한 번 시도
+    await page.goto(GW + "/", { timeout: 60000 });
+    list = await page.fetch(`${MAILDB}/api/data/collections/name/($inbox_all_portal)?ps=40&page=0`, { timeout: 30000 });
+    try { entries = JSON.parse(list.body); } catch { entries = null; }
+  }
+  if (!Array.isArray(entries)) {
+    result.ok = false; result.loginRequired = true;
+    result.message = `메일 목록을 못 읽었습니다(HTTP ${list.status}). 그룹웨어 로그인이 풀렸을 수 있습니다.`;
+  } else {
+    const cutoff = Date.now() - FIRST_RUN_LOOKBACK_HOURS * 3600e3;
+    const targets = entries.filter((e) => !seen.has(e["@unid"]) && (!firstRun || new Date(e._created).getTime() >= cutoff));
+    for (const e of targets.reverse()) {
+      const unid = e["@unid"];
+      const doc = JSON.parse((await page.fetch(`${MAILDB}/api/data/documents/unid/${unid}`, { timeout: 30000 })).body);
+      const subject = doc.Subject || e._subject || "(제목 없음)";
+      const when = kst(doc.PostedDate || e._created);
+      const dir = `${INBOX_DIR}/${when.slice(0, 10).replace(/-/g, "")}-${when.slice(11).replace(":", "")}_${safe(subject)}`;
+      await fs.mkdir(dir, { recursive: true });
+
+      const fromName = lang(doc.AuthorName) || String(doc.From || e._author || "").replace(/^CN=([^/]+).*$/, "$1");
+      const fromOrg = [lang(doc.AuthorOrgName), lang(doc.AuthorDutyName)].filter(Boolean).join(" ");
+      const attachments = [];
+      let info = []; try { info = e._attachinfo ? JSON.parse(e._attachinfo) : []; } catch {}
+      for (const a of info) {
+        const size = Number(a.size || 0);
+        const item = { name: a.name, size, saved: null, text: null, skipped: null };
+        if (!ATTACH_EXT_OK.test(a.name)) item.skipped = "지원하지 않는 형식";
+        else if (size > ATTACH_MAX_BYTES) item.skipped = "30MB 초과";
+        else {
+          const ext = (a.name.match(/\.[^.]+$/) || [""])[0];
+          const out = `${dir}/att_${safe(a.name.replace(/\.[^.]+$/, ""))}${ext}`;
+          const r = await page.fetch(a.url, { saveAs: out, timeout: 120000 });
+          if (!r.ok) item.skipped = `다운로드 실패(HTTP ${r.status})`;
+          else {
+            item.saved = out;
+            if (/\.(pptx|docx|xlsx)$/i.test(ext)) {
+              try {
+                const t = officeText(a.name, await fs.readFile(out));
+                if (t) { item.text = out.replace(/\.[^.]+$/, ".txt"); await fs.writeFile(item.text, t, "utf8"); }
+              } catch {}
+            }
+          }
+        }
+        attachments.push(item);
+      }
+
+      // 내 위치: 받는 사람(수신) / 참조 / 기타(숨은참조·그룹 발송 등)
+      const ME = new RegExp(CFG.meMatch, "i");
+      const inList = (v) => (Array.isArray(v) ? v : v ? [v] : []).some((x) => ME.test(String(x)));
+      const role = inList(doc.SendTo) || inList(doc.InetSendTo) ? "수신" : inList(doc.CopyTo) || inList(doc.InetCopyTo) ? "참조" : "기타";
+      const md = [
+        `# ${subject}`, "",
+        `- 내 위치: ${role}`,
+        `- 보낸 사람: ${fromName}${fromOrg ? ` (${fromOrg})` : ""} ${doc.INetFrom || ""}`.trim(),
+        `- 보낸 시각: ${when} (KST)`,
+        `- 받는 사람: ${cn(doc.SendTo).join(", ")}`,
+        cn(doc.CopyTo).length ? `- 참조: ${cn(doc.CopyTo).join(", ")}` : null,
+        attachments.length ? `- 첨부: ${attachments.map((a) => a.name + (a.skipped ? ` [${a.skipped}]` : "")).join(", ")}` : null,
+        "", "---", "", bodyText(doc.Body),
+      ].filter((x) => x !== null).join("\n");
+      await fs.writeFile(`${dir}/mail.md`, md, "utf8");
+
+      result.newMails.push({ unid, subject, from: fromName, when, dir, attachments, role, openUrl: e._openurl ? GW + e._openurl : null });
+      seen.add(unid);
+    }
+    // 진단: 수집(API 읽기) 전후로 그룹웨어의 읽음 상태가 바뀌는지 기록
+    if (targets.length) {
+      try {
+        const after = JSON.parse((await page.fetch(`${MAILDB}/api/data/collections/name/($inbox_all_portal)?ps=40&page=0`, { timeout: 30000 })).body);
+        const now = new Map(after.map((x) => [x["@unid"], !!x["@read"]]));
+        result.readCheck = targets.map((e) => ({ subject: e._subject, before: !!e["@read"], after: now.get(e["@unid"]) ?? null }));
+      } catch {}
+    }
+    if (firstRun) for (const e of entries) seen.add(e["@unid"]);
+    await fs.mkdir(ROOT, { recursive: true });
+    state = { seen: [...seen].slice(-2000), initializedAt: state.initializedAt || new Date().toISOString(), lastRunAt: new Date().toISOString(), lastReloadAt: state.lastReloadAt };
+    await fs.writeFile(STATE, JSON.stringify(state, null, 1), "utf8");
+    if (result.newMails.length) {
+      const pending = await readJson(PENDING, []);
+      for (const m of result.newMails) pending.push({ dir: m.dir, unid: m.unid, subject: m.subject, from: m.from, when: m.when, role: m.role, openUrl: m.openUrl });
+      await fs.writeFile(PENDING, JSON.stringify(pending, null, 1), "utf8");
+    }
+  }
+} catch (err) {
+  result.ok = false; result.message = String(err?.message || err);
+}
+await fs.writeFile(`${ROOT}/last-result.json`, JSON.stringify(result), "utf8");
+console.log("RESULT_JSON=" + JSON.stringify(result));

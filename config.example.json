@@ -1,0 +1,9 @@
+{
+  "gwHost": "https://groupware.example.com",
+  "mailDb": "/mail/your-server/your-mailbox.nsf",
+  "mailViewPath": "/dwp/com/portal/main.nsf/wfrmpage?ReadForm&url={mailDb}/($inbox_all)/{unid}?opendocument%26popup=1",
+  "meMatch": "your-employee-id|your-mail-id@|홍길동",
+  "userName": "홍길동",
+  "userLabel": "회사 팀 홍길동",
+  "claudePath": "C:/path/to/claude-cli/claude.cmd"
+}
