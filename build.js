@@ -333,6 +333,7 @@ body{font-size:16px;line-height:26px}
 .mails .banner .btn{flex:none}
 .banner button.act{border:0;background:none;font-family:inherit;cursor:pointer}
 .empty .hint{max-width:360px}
+.series details.flash>summary{box-shadow:inset 0 0 0 2px var(--primary)}
 .mails details.flash>summary{box-shadow:inset 0 0 0 2px var(--primary)}
 @media (max-width:767px){
   .wrap{padding:var(--space-6) var(--space-4) var(--space-12)}
@@ -404,6 +405,7 @@ const MAILS = ${data};
 const SERIES = ${seriesData};
 const GW_HOME = ${JSON.stringify(GW + "/")};
 const LATEST = new Set(SERIES.map(s => s.items[0].id)); // 반복 메일은 받은 메일 목록에 최신 회차만
+const SERIES_N = {}; for (const s of SERIES) SERIES_N[s.name] = s.items.length; // 묶음별 회차 수
 const THREADS = ${threadData}; // 대화 묶음: 최신 메일 id -> 대화 전체(최신순)
 const OPENMAP = {}; // 목록에서 숨긴 대화 속 메일 -> 최신 메일
 for (const [lid, arr] of Object.entries(THREADS)) for (const it of arr) if (it.id !== lid) OPENMAP[it.id] = lid;
@@ -507,6 +509,7 @@ function render(){
   document.getElementById("doneSum").textContent = "완료한 일 "+done.length+"개";
   document.getElementById("done").innerHTML = done.map(taskRow).join("");
 }
+const issueLabel = it => (it.issue && it.issue !== md(it.date) ? it.issue + " · " : "") + md(it.date); // 회차 이름이 날짜와 같으면 한 번만
 function renderSeries(){
   const box = document.getElementById("seriesSec");
   box.style.display = SERIES.length ? "" : "none";
@@ -514,11 +517,11 @@ function renderSeries(){
   const openNow = new Set([...document.querySelectorAll("#series details[open]")].map(d => d.dataset.name));
   document.getElementById("series").innerHTML = SERIES.slice(0, SHOW.series).map(s => {
     const last = s.items[0], n = s.items.length, histN = SHOW.hist[s.name] || 10;
-    const lastLabel = (last.issue ? last.issue + " · " : "") + md(last.date);
+    const lastLabel = issueLabel(last);
     const changes = last.changes.length
       ? '<ul class="s-changes">'+last.changes.map(c => '<li>'+esc(c)+'</li>').join("")+'</ul>'
       : '<span class="hint">'+(n === 1 ? "첫 회차라 비교할 이전 기록이 없어요" : last.compared ? "지난 회차와 달라진 점이 없어요" : "이전 회차 정보 없이 요약돼서 비교하지 못했어요")+'</span>';
-    const hist = s.items.slice(0, histN).map((it, i) => '<li class="s-item'+(i===0?" now":"")+'"><span class="s-when">'+esc((it.issue ? it.issue + " · " : "") + md(it.date))+'</span>'+
+    const hist = s.items.slice(0, histN).map((it, i) => '<li class="s-item'+(i===0?" now":"")+'"><span class="s-when">'+esc(issueLabel(it))+'</span>'+
       '<span class="s-body"><span class="s-one">'+esc(it.oneLine)+'</span>'+
       (it.changes.length ? '<span class="s-ch">'+it.changes.map(esc).join(" · ")+'</span>' : '')+
       (i === 0 && MAILS.some(m => m.id === it.id) ? '<a href="#'+esc(it.id)+'" data-open="'+esc(it.id)+'" class="s-link">받은 메일에서 자세히 보기</a>'
@@ -550,7 +553,8 @@ function mailItem(m, prefix){
   const th = THREADS[m.id];
   if((m.tasks||[]).length) tags.push('<span class="tag">할 일 '+m.tasks.length+'</span>');
   if(th) tags.push('<span class="tag">대화 '+th.length+'통</span>');
-  if(m.series && m.series.name) tags.push('<span class="tag">'+esc(m.series.name)+(m.series.issue ? ' · '+esc(m.series.issue) : '')+'</span>');
+  const sN = m.series && m.series.name ? (SERIES_N[m.series.name] || 1) : 0;
+  if(sN) tags.push('<span class="tag">'+esc(m.series.name)+(m.series.issue ? ' · '+esc(m.series.issue) : '')+(sN > 1 ? ' · '+sN+'회차' : '')+'</span>');
   if((m.attachments||[]).length) tags.push('<span class="tag">첨부 '+m.attachments.length+'</span>');
   const fl = flagOf(m), wTitle = m.warning ? m.warning.split(":")[0] : "";
   if(m.warning) tags.push(
@@ -563,7 +567,7 @@ function mailItem(m, prefix){
     '<span class="m-one">'+esc(m.oneLine)+'</span>'+(tags.length?'<span class="m-tags">'+tags.join("")+'</span>':"")+'</span>'+
     '<span class="m-side">'+(prefix ? esc(md(m.date))+' ' : '')+esc(m.time)+'<span class="chev" aria-hidden="true">⌄</span></span><span aria-hidden="true"></span>'+
     '</summary><div class="body"><div class="from-row"><span class="from">보낸 사람 · '+esc(m.from)+'</span>'+
-    '<span class="open-btns">'+
+    '<span class="open-btns">'+(sN > 1 && LATEST.has(m.id) ? '<button type="button" class="btn ghost" data-series="'+esc(m.series.name)+'">지난 '+(sN - 1)+'통 회차 기록 보기</button>' : '')+
     '<a class="btn secondary" href="'+esc(m.gwUrl || GW_HOME)+'" target="_blank" rel="noopener">'+(m.gwUrl ? "그룹웨어에서 열기" : "그룹웨어 열기")+'</a></span></div>'+
     (m.warning ? warnBlock(m, fl, wTitle) : "")+
     blk("할 일", (m.tasks||[]).map(t => t.superseded ? '<s>'+esc(t.text)+'</s> <span class="badge"><span class="dot"></span>변경됨</span>'+(t.superseded.why ? '<br><span class="hint">'+esc(t.superseded.why)+'</span>' : "") : esc(t.text)+(t.due?' · '+esc(md(t.due))+'까지':"")+(t.kind === "watch" ? ' · 지켜볼 일(담당 '+esc(t.owner || "미정")+')' : '')+'<br>'+srcInfo(t.source))) +
@@ -646,6 +650,15 @@ document.addEventListener("keydown", e => {
 document.addEventListener("click", e => {
   if(e.target.closest(".srcinfo") && !e.target.closest("a")){ e.preventDefault(); return; } // 근거 칩을 눌러도 체크되지 않게
   if(e.target.closest("[data-clear]")){ const q = document.getElementById("q"); q.value = ""; document.querySelector(".search-bar .clear").hidden = true; renderSearch(); q.focus(); return; }
+  const sb = e.target.closest("[data-series]");
+  if(sb){ // 반복 메일 칸의 해당 묶음을 열고 그 위치로
+    e.preventDefault();
+    const name = sb.dataset.series, idx = SERIES.findIndex(x => x.name === name);
+    if(idx >= SHOW.series){ SHOW.series = idx + 1; renderSeries(); }
+    const d = [...document.querySelectorAll("#series > details")].find(x => x.dataset.name === name);
+    if(d){ d.open = true; d.scrollIntoView({behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block:"start"}); d.classList.add("flash"); setTimeout(() => d.classList.remove("flash"), 1600); }
+    return;
+  }
   const mo = e.target.closest("[data-more]");
   if(mo){
     e.preventDefault();
