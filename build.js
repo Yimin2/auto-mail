@@ -404,7 +404,7 @@ function render() {
 const MAILS = ${data};
 const SERIES = ${seriesData};
 const GW_HOME = ${JSON.stringify(GW + "/")};
-const LATEST = new Set(SERIES.map(s => s.items[0].id)); // 반복 메일은 받은 메일 목록에 최신 회차만
+const LATEST = new Set(SERIES.map(s => s.items[0].id)); // 묶음별 최신 회차
 const SERIES_N = {}; for (const s of SERIES) SERIES_N[s.name] = s.items.length; // 묶음별 회차 수
 const THREADS = ${threadData}; // 대화 묶음: 최신 메일 id -> 대화 전체(최신순)
 const OPENMAP = {}; // 목록에서 숨긴 대화 속 메일 -> 최신 메일
@@ -567,7 +567,7 @@ function mailItem(m, prefix){
     '<span class="m-one">'+esc(m.oneLine)+'</span>'+(tags.length?'<span class="m-tags">'+tags.join("")+'</span>':"")+'</span>'+
     '<span class="m-side">'+(prefix ? esc(md(m.date))+' ' : '')+esc(m.time)+'<span class="chev" aria-hidden="true">⌄</span></span><span aria-hidden="true"></span>'+
     '</summary><div class="body"><div class="from-row"><span class="from">보낸 사람 · '+esc(m.from)+'</span>'+
-    '<span class="open-btns">'+(sN > 1 && LATEST.has(m.id) ? '<button type="button" class="btn ghost" data-series="'+esc(m.series.name)+'">지난 '+(sN - 1)+'통 회차 기록 보기</button>' : '')+
+    '<span class="open-btns">'+(sN > 1 ? '<button type="button" class="btn ghost" data-series="'+esc(m.series.name)+'">회차 기록 보기 · '+sN+'회차</button>' : '')+
     '<a class="btn secondary" href="'+esc(m.gwUrl || GW_HOME)+'" target="_blank" rel="noopener">'+(m.gwUrl ? "그룹웨어에서 열기" : "그룹웨어 열기")+'</a></span></div>'+
     (m.warning ? warnBlock(m, fl, wTitle) : "")+
     blk("할 일", (m.tasks||[]).map(t => t.superseded ? '<s>'+esc(t.text)+'</s> <span class="badge"><span class="dot"></span>변경됨</span>'+(t.superseded.why ? '<br><span class="hint">'+esc(t.superseded.why)+'</span>' : "") : esc(t.text)+(t.due?' · '+esc(md(t.due))+'까지':"")+(t.kind === "watch" ? ' · 지켜볼 일(담당 '+esc(t.owner || "미정")+')' : '')+'<br>'+srcInfo(t.source))) +
@@ -586,7 +586,7 @@ function dayLabel(date){
 }
 function listMails(){
   const recent = new Date(Date.now() - ${KEEP_DAYS}*864e5).toISOString().slice(0,10);
-  return WORK.filter(m => !(m.series && m.series.name && !LATEST.has(m.id)) && !OPENMAP[m.id])
+  return WORK.filter(m => !OPENMAP[m.id]) // 반복 메일도 받은 메일에는 날짜별로 모두 보여요(묶음은 반복 메일 칸에서)
     .filter(m => m.date >= recent || (m.tasks||[]).some(t => !doneMap[t.id])).sort((a,b) => (b.date+b.time).localeCompare(a.date+a.time));
 }
 function renderMails(){
