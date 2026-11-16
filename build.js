@@ -56,6 +56,7 @@ function ingest(rawFile, pendingFile) {
   const now = new Date().toISOString();
   const urlOf = new Map(pending.map((p) => [idOf(p.dir), p.openUrl || null]));
   const roleOf = new Map(pending.map((p) => [idOf(p.dir), p.role || null]));
+  const riskOf = new Map(pending.map((p) => [idOf(p.dir), p.risk || null])); // 규칙 기반 보안 검사 결과
   const kindOf = (t, role) => t.kind === "mine" || t.kind === "watch" ? t.kind : (role && role !== "수신" ? "watch" : "mine");
   if (parsed) {
     for (const m of parsed) {
@@ -66,11 +67,12 @@ function ingest(rawFile, pendingFile) {
         importance: ["high", "mid", "low"].includes(m.importance) ? m.importance : "mid",
         oneLine: m.oneLine || "", points: m.points || [], attachments: m.attachments || [],
         role: roleOf.get(id) || null,
+        risk: riskOf.get(id) || null,
         tasks: (m.tasks || []).map((t, i) => ({ id: `${id}#${i}`, text: t.text, due: t.due || null,
           kind: kindOf(t, roleOf.get(id)), owner: t.owner ? String(t.owner).slice(0, 40) : null, source: t.source && typeof t.source === "object" ? {
           file: String(t.source.file || "").slice(0, 120) || null, where: t.source.where ? String(t.source.where).slice(0, 60) : null,
           quote: t.source.quote ? String(t.source.quote).slice(0, 200) : null, why: t.source.why ? String(t.source.why).slice(0, 300) : null } : null })),
-        warning: m.warning || null, addedAt: now,
+        warning: m.warning || (riskOf.get(id) && riskOf.get(id).level === "high" ? "피싱 의심: " + riskOf.get(id).reasons.join(", ") : null), addedAt: now,
         threadNew: (m.threadNew || []).map((c) => String(c).slice(0, 120)).slice(0, 4),
         series: m.series && m.series.name ? { name: String(m.series.name).slice(0, 40), issue: m.series.issue ? String(m.series.issue).slice(0, 30) : null,
           changes: (m.series.changes || []).map((c) => String(c).slice(0, 120)).slice(0, 4), compared: m.series.compared === true || m.series.compared === "true" } : null,
@@ -112,6 +114,9 @@ function ingest(rawFile, pendingFile) {
   fs.writeFileSync(`${ROOT}/last-ingest.json`, JSON.stringify({
     work: added.filter((m) => m && !isPromo(m)).map((m) => m.subject),
     promo: added.filter(isPromo).length,
+    // 경고 알림·그룹웨어 미확인 유지용
+    danger: added.filter((m) => m && m.warning).map((m) => m.subject),
+    dangerUnids: added.filter((m) => m && m.warning).map((m) => (String(m.url || "").match(/\/0\/([0-9A-Fa-f]{32})/) || [])[1]).filter(Boolean),
     tasks: added.filter((m) => m && !isPromo(m)).reduce((n, m) => n + (m.tasks || []).filter((t) => t.kind !== "watch").length, 0),
   }), "utf8");
   console.log(parsed ? `ok ${parsed.length}` : "fallback");
@@ -535,16 +540,31 @@ function renderSeries(){
       '<div class="body"><h3 class="s-hist-title">회차별 기록</h3><ol class="s-hist">'+hist+'</ol>'+moreBtn("hist:"+s.name, n - histN, "이전 회차 "+(n - histN)+"개 더 보기")+'</div></details>';
   }).join("") + moreBtn("series", SERIES.length - SHOW.series, "반복 메일 묶음 "+(SERIES.length - SHOW.series)+"개 더 보기");
 }
+// 규칙 기반 자동 보안 검사 결과 목록
+function riskList(m){
+  if(!m.risk || !(m.risk.reasons||[]).length) return "";
+  return '<div class="blk"><h3>자동 보안 검사 · '+(m.risk.level === "high" ? "위험" : "주의")+'</h3><ul>'+m.risk.reasons.map(x => '<li>'+esc(x)+'</li>').join("")+'</ul></div>';
+}
+// 보안 담당자에게 보낼 신고 내용 복사 (발송은 직접)
+function reportBtn(m){ return '<button type="button" class="btn ghost" data-report="'+esc(m.id)+'">신고 내용 복사하기</button>'; }
+function reportText(m){
+  const lines = ["[의심 메일 신고]", "제목: " + m.subject, "보낸 사람: " + m.from, "받은 시각: " + m.date + " " + m.time];
+  if(m.warning) lines.push("AI 판단: " + m.warning);
+  if(m.risk && (m.risk.reasons||[]).length) lines.push("자동 검사: " + m.risk.reasons.join(" / "));
+  if(m.gwUrl) lines.push("그룹웨어 메일: " + m.gwUrl);
+  lines.push("", "링크나 첨부는 열지 않았습니다. 확인 부탁드립니다.");
+  return lines.join(String.fromCharCode(10));
+}
 function warnBlock(m, fl, wTitle){
   const why = esc(m.warning.split(":").slice(1).join(":").trim());
   const when = fl ? esc(md(String(flagMap[m.id].at).slice(0,10))) : "";
   if(fl === "safe") return '<div class="banner success" role="status">'+ICON.check+'<div class="txt"><strong>의심을 해제했어요 · '+when+'</strong>AI 판단: '+esc(wTitle)+(why?' — '+why:'')+'</div>'+
     '<button type="button" class="act" data-flag="'+esc(m.id)+'" data-v="">되돌리기</button></div>';
-  if(fl === "danger") return '<div class="banner danger" role="alert">'+ICON.warn+'<div class="txt"><strong>위험 메일로 표시했어요 · '+when+'</strong>링크를 누르거나 코드를 입력하지 마세요. 정보보안 담당자에게 신고하면 좋아요.</div>'+
+  if(fl === "danger") return riskList(m) + '<div class="flag-actions">'+reportBtn(m)+'</div>' + '<div class="banner danger" role="alert">'+ICON.warn+'<div class="txt"><strong>위험 메일로 표시했어요 · '+when+'</strong>링크를 누르거나 코드를 입력하지 마세요. 정보보안 담당자에게 신고하면 좋아요.</div>'+
     '<button type="button" class="act" data-flag="'+esc(m.id)+'" data-v="">되돌리기</button></div>';
-  return '<div class="banner warning" role="alert">'+ICON.warn+'<div class="txt"><strong>'+esc(wTitle)+' · 확인이 필요해요</strong>'+why+'</div></div>'+
+  return '<div class="banner warning" role="alert">'+ICON.warn+'<div class="txt"><strong>'+esc(wTitle)+' · 확인이 필요해요</strong>'+why+'</div></div>'+riskList(m)+
     '<div class="flag-actions"><button type="button" class="btn outline" data-flag="'+esc(m.id)+'" data-v="safe">의심 해제하기</button>'+
-    '<button type="button" class="btn secondary" data-flag="'+esc(m.id)+'" data-v="danger">위험으로 표시하기</button></div>';
+    '<button type="button" class="btn secondary" data-flag="'+esc(m.id)+'" data-v="danger">위험으로 표시하기</button>'+reportBtn(m)+'</div>';
 }
 const LV = {high:['danger','중요'], mid:['warning','보통'], low:['','참고']};
 function mailItem(m, prefix){
@@ -561,6 +581,7 @@ function mailItem(m, prefix){
     fl === "safe" ? '<span class="badge success"><span class="dot"></span>의심 해제</span>' :
     fl === "danger" ? '<span class="badge danger"><span class="dot"></span>위험 메일</span>' :
     '<span class="badge warning"><span class="dot"></span>'+esc(wTitle)+' · 확인 필요</span>');
+  if(!m.warning && m.risk && m.risk.level === "mid") tags.push('<span class="badge warning"><span class="dot"></span>보안 주의</span>');
   const blk = (title, arr) => arr && arr.length ? '<div class="blk"><h3>'+title+'</h3><ul>'+arr.map(x => '<li>'+x+'</li>').join("")+'</ul></div>' : "";
   return '<details id="'+esc((prefix || "")+m.id)+'"><summary>'+
     '<span class="m-main"><span class="m-head"><span class="badge '+cls+'"><span class="dot"></span>'+txt+'</span><span class="m-subj">'+esc(m.subject)+'</span></span>'+
@@ -569,7 +590,7 @@ function mailItem(m, prefix){
     '</summary><div class="body"><div class="from-row"><span class="from">보낸 사람 · '+esc(m.from)+'</span>'+
     '<span class="open-btns">'+(sN > 1 ? '<button type="button" class="btn ghost" data-series="'+esc(m.series.name)+'">회차 기록 보기 · '+sN+'회차</button>' : '')+
     '<a class="btn secondary" href="'+esc(m.gwUrl || GW_HOME)+'" target="_blank" rel="noopener">'+(m.gwUrl ? "그룹웨어에서 열기" : "그룹웨어 열기")+'</a></span></div>'+
-    (m.warning ? warnBlock(m, fl, wTitle) : "")+
+    (m.warning ? warnBlock(m, fl, wTitle) : riskList(m))+
     blk("할 일", (m.tasks||[]).map(t => t.superseded ? '<s>'+esc(t.text)+'</s> <span class="badge"><span class="dot"></span>변경됨</span>'+(t.superseded.why ? '<br><span class="hint">'+esc(t.superseded.why)+'</span>' : "") : esc(t.text)+(t.due?' · '+esc(md(t.due))+'까지':"")+(t.kind === "watch" ? ' · 지켜볼 일(담당 '+esc(t.owner || "미정")+')' : '')+'<br>'+srcInfo(t.source))) +
     ((m.threadNew||[]).length ? '<div class="blk"><h3>이번 답장에서 새로 나온 내용</h3><ul class="t-new">'+m.threadNew.map(x => '<li>'+esc(x)+'</li>').join("")+'</ul></div>' : '') +
     blk("핵심 내용", (m.points||[]).map(esc)) +
@@ -650,6 +671,16 @@ document.addEventListener("keydown", e => {
 document.addEventListener("click", e => {
   if(e.target.closest(".srcinfo") && !e.target.closest("a")){ e.preventDefault(); return; } // 근거 칩을 눌러도 체크되지 않게
   if(e.target.closest("[data-clear]")){ const q = document.getElementById("q"); q.value = ""; document.querySelector(".search-bar .clear").hidden = true; renderSearch(); q.focus(); return; }
+  const rb = e.target.closest("[data-report]");
+  if(rb){
+    e.preventDefault();
+    const m = MAILS.find(x => x.id === rb.dataset.report); if(!m) return;
+    const text = reportText(m), label = rb.textContent;
+    const done = () => { rb.textContent = "복사했어요"; setTimeout(() => { rb.textContent = label; }, 1600); };
+    const fallback = () => { const ta = document.createElement("textarea"); ta.value = text; document.body.appendChild(ta); ta.select(); try { document.execCommand("copy"); } catch (err) {} ta.remove(); done(); };
+    if(navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done, fallback); else fallback();
+    return;
+  }
   const sb = e.target.closest("[data-series]");
   if(sb){ // 반복 메일 칸의 해당 묶음을 열고 그 위치로
     e.preventDefault();

@@ -58,6 +58,82 @@ function bodyText(body) {
   return html ? htmlToText(decode(html)) : "";
 }
 
+// ---------- 규칙 기반 보안 검사 (AI 판단과 별개로, 토큰 사용 없음) ----------
+function bodyHtmlRaw(body) {
+  const parts = (body && body.content) || [];
+  const p = parts.find((x) => /^text\/html/i.test(x.contentType || "") && x.data);
+  if (!p) return typeof body === "string" ? body : "";
+  const enc = (p.contentTransferEncoding || "").toLowerCase();
+  return enc === "base64" ? Buffer.from(p.data, "base64").toString("utf8") : enc === "quoted-printable" ? decodeQP(p.data) : p.data;
+}
+const companyDomains = (() => {
+  const list = (CFG.companyDomains || []).map((d) => String(d).toLowerCase());
+  if (!list.length) { const h = new URL(GW).hostname.toLowerCase().split("."); list.push(h.length > 2 ? h.slice(1).join(".") : h.join(".")); }
+  return list;
+})();
+const isCompany = (d) => !!d && companyDomains.some((c) => d === c || d.endsWith("." + c));
+const lev = (a, b) => { const m = [...Array(b.length + 1).keys()]; for (let i = 1; i <= a.length; i++) { let p = m[0]; m[0] = i; for (let j = 1; j <= b.length; j++) { const t = m[j]; m[j] = Math.min(m[j] + 1, m[j - 1] + 1, p + (a[i - 1] === b[j - 1] ? 0 : 1)); p = t; } } return m[b.length]; };
+const lookalike = (d) => {
+  if (!d || isCompany(d)) return false;
+  return companyDomains.some((c) => {
+    const cl = c.split(".")[0], dl = d.split(".")[0], flat = (s) => s.replace(/[-_.]/g, "");
+    return (flat(d).includes(flat(cl)) && cl.length >= 4) || (lev(dl, cl) <= 2 && dl !== cl) || lev(d, c) <= 2;
+  });
+};
+const SHORTENERS = /^(bit\.ly|tinyurl\.com|t\.co|goo\.gl|me2\.do|han\.gl|url\.kr|vo\.la|t\.ly|is\.gd|buly\.kr|c11\.kr|lrl\.kr|ow\.ly|rebrand\.ly|cutt\.ly|shorturl\.at)$/i;
+const DANGER_EXT = /\.(exe|scr|com|pif|bat|cmd|ps1|vbs|vbe|js|jse|wsf|hta|msi|jar|lnk|iso|img|vhd|reg|cpl)$/i;
+const MACRO_EXT = /\.(docm|xlsm|pptm|dotm|xltm|xlam)$/i;
+const ARCHIVE_EXT = /\.(zip|rar|7z|alz|egg|gz|tar|cab)$/i;
+const HTML_EXT = /\.(html?|svg|xhtml|mht)$/i;
+const DOUBLE_EXT = /\.(pdf|docx?|xlsx?|pptx?|hwpx?|txt|jpe?g|png|gif)\.[a-z0-9]{2,5}$/i;
+// 외부 주소가 표시 이름에 쓰면 사칭으로 보는 사내 역할 이름
+const SPOOF_WORDS = /(관리자|administrator|it\s?팀|it\s?지원|전산실|전산팀|정보보안|보안팀|security\s?team|인사팀|총무팀|대표이사|ceo|helpdesk|헬프데스크)/i;
+// 기관·브랜드 이름은 실제 도메인과 맞지 않을 때만 사칭으로 봄
+const BRANDS = [[/국세청|홈택스/, /(^|\.)nts\.go\.kr$|(^|\.)hometax\.go\.kr$/], [/경찰/, /(^|\.)police\.go\.kr$/], [/검찰/, /(^|\.)spo\.go\.kr$/],
+  [/microsoft|office\s?365|outlook|마이크로소프트/i, /(^|\.)(microsoft|office|outlook|live)\.com$/]];
+function securityCheck(doc, attachInfo) {
+  const high = [], mid = [];
+  const from = String(doc.INetFrom || doc.From || "");
+  const addr = ((from.match(/<([^>]+)>/) || [, from])[1] || "").trim().toLowerCase();
+  const display = (from.match(/^\s*"?([^"<]*)"?\s*</) || [, ""])[1].trim();
+  const domain = addr.includes("@") ? addr.split("@")[1] : "";
+  const external = !!domain && !isCompany(domain);
+  if (lookalike(domain)) high.push(`보낸 주소가 회사 도메인과 비슷한 다른 도메인(${domain})`);
+  if (external && display && (SPOOF_WORDS.test(display) || companyDomains.some((c) => display.toLowerCase().includes(c.split(".")[0])))) high.push(`외부 주소(${domain})인데 표시 이름이 "${display}"`);
+  else if (external && display) { const b = BRANDS.find(([name, dom]) => name.test(display) && !dom.test(domain)); if (b) high.push(`표시 이름("${display}")의 기관·브랜드와 실제 주소(${domain})가 다름`); }
+  if (external && /@/.test(display) && !display.toLowerCase().includes(addr)) high.push(`표시 이름에 다른 메일 주소가 들어 있음`);
+  const replyTo = String(doc.ReplyTo || doc.InetReplyTo || doc.$INetReplyTo || "").toLowerCase();
+  const rDomain = (replyTo.match(/@([a-z0-9.-]+)/) || [])[1];
+  if (rDomain && domain && rDomain !== domain) high.push(`답장 주소(${rDomain})가 보낸 주소(${domain})와 다름`);
+  // 본문 링크
+  const html = bodyHtmlRaw(doc.Body);
+  const seen = new Set();
+  for (const m of html.matchAll(/<a\b[^>]*href\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi)) {
+    let u; try { u = new URL(m[1].replace(/&amp;/g, "&")); } catch { continue; }
+    if (!/^https?:$/.test(u.protocol)) continue;
+    const host = u.hostname.toLowerCase(), text = m[2].replace(/<[^>]+>/g, "").replace(/&nbsp;/g, " ").trim();
+    const shown = (text.match(/(?:https?:\/\/)?([a-z0-9-]+(?:\.[a-z0-9-]+)+)/i) || [])[1];
+    const key = host + "|" + (shown || "");
+    if (seen.has(key)) continue; seen.add(key);
+    if (shown && !host.endsWith(shown.toLowerCase().replace(/^www\./, "")) && !shown.toLowerCase().replace(/^www\./, "").endsWith(host.replace(/^www\./, ""))) high.push(`링크 글자(${shown})와 실제 주소(${host})가 다름`);
+    if (host.startsWith("xn--") || host.includes(".xn--")) high.push(`국제화 도메인 링크(${host}) - 철자 위장 가능`);
+    if (lookalike(host)) high.push(`회사 사칭 의심 링크(${host})`);
+    if (SHORTENERS.test(host)) mid.push(`단축 URL 링크(${host})`);
+    if (external && /^\d+\.\d+\.\d+\.\d+$/.test(host)) mid.push(`IP 주소로 된 링크(${host})`);
+  }
+  // 첨부
+  for (const a of attachInfo || []) {
+    const n = String(a.name || "");
+    if (DOUBLE_EXT.test(n) && (DANGER_EXT.test(n) || HTML_EXT.test(n))) high.push(`이중 확장자 첨부(${n})`);
+    else if (DANGER_EXT.test(n)) high.push(`실행 파일 첨부(${n})`);
+    else if (HTML_EXT.test(n)) high.push(`HTML 첨부(${n}) - 가짜 로그인 화면에 자주 쓰임`);
+    else if (MACRO_EXT.test(n)) mid.push(`매크로 문서 첨부(${n})`);
+    else if (ARCHIVE_EXT.test(n)) mid.push(`압축 파일 첨부(${n}) - 내용 확인 불가`);
+  }
+  const uniq = (a) => [...new Set(a)].slice(0, 6);
+  return high.length ? { level: "high", reasons: uniq(high.concat(mid)) } : mid.length ? { level: "mid", reasons: uniq(mid) } : null;
+}
+
 // ---------- office(zip) 텍스트 추출 ----------
 // zip 폭탄 방지: 항목 하나는 풀어서 20MB, 전체는 60MB까지만 (넘으면 UNZIP_LIMIT 오류)
 const UNZIP_MAX_ENTRY = 20 * 1024 * 1024;
@@ -211,6 +287,7 @@ try {
       const ME = new RegExp(CFG.meMatch, "i");
       const inList = (v) => (Array.isArray(v) ? v : v ? [v] : []).some((x) => ME.test(String(x)));
       const role = inList(doc.SendTo) || inList(doc.InetSendTo) ? "수신" : inList(doc.CopyTo) || inList(doc.InetCopyTo) ? "참조" : "기타";
+      const risk = securityCheck(doc, info); // 규칙 기반 보안 검사(발신자·링크·첨부)
       const md = [
         `# ${subject}`, "",
         `- 내 위치: ${role}`,
@@ -219,11 +296,12 @@ try {
         `- 받는 사람: ${cn(doc.SendTo).join(", ")}`,
         cn(doc.CopyTo).length ? `- 참조: ${cn(doc.CopyTo).join(", ")}` : null,
         attachments.length ? `- 첨부: ${attachments.map((a) => a.name + (a.skipped ? ` [${a.skipped}]` : "")).join(", ")}` : null,
+        risk ? `- 자동 보안 검사: ${risk.level === "high" ? "위험" : "주의"} — ${risk.reasons.join(" / ")}` : null,
         "", "---", "", bodyText(doc.Body),
       ].filter((x) => x !== null).join("\n");
       await fs.writeFile(`${dir}/mail.md`, md, "utf8");
 
-      result.newMails.push({ unid, subject, from: fromName, when, dir, attachments, role, openUrl: e._openurl ? GW + e._openurl : null });
+      result.newMails.push({ unid, subject, from: fromName, when, dir, attachments, role, risk, openUrl: e._openurl ? GW + e._openurl : null });
       seen.add(unid);
     }
     // 진단: 수집(API 읽기) 전후로 그룹웨어의 읽음 상태가 바뀌는지 기록
@@ -240,7 +318,7 @@ try {
     await fs.writeFile(STATE, JSON.stringify(state, null, 1), "utf8");
     if (result.newMails.length) {
       const pending = await readJson(PENDING, []);
-      for (const m of result.newMails) pending.push({ dir: m.dir, unid: m.unid, subject: m.subject, from: m.from, when: m.when, role: m.role, openUrl: m.openUrl });
+      for (const m of result.newMails) pending.push({ dir: m.dir, unid: m.unid, subject: m.subject, from: m.from, when: m.when, role: m.role, risk: m.risk || null, openUrl: m.openUrl });
       await fs.writeFile(PENDING, JSON.stringify(pending, null, 1), "utf8");
     }
   }

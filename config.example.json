@@ -5,5 +5,8 @@
   "meMatch": "your-employee-id|your-mail-id@|홍길동",
   "userName": "홍길동",
   "userLabel": "회사 팀 홍길동",
-  "claudePath": "C:/path/to/claude-cli/claude.cmd"
+  "claudePath": "C:/path/to/claude-cli/claude.cmd",
+  "companyDomains": [
+    "example.com"
+  ]
 }

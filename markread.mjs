@@ -15,6 +15,16 @@ if (!page) page = await task.newPage();
 try {
   if (!String(await page.url()).startsWith(GW)) await page.goto(GW + "/", { timeout: 60000 });
   for (const it of items) {
+    if (it.unread) {
+      // 의심 메일: 그룹웨어 메일 앱의 '선택한 메일 안읽음 표시'와 같은 요청으로 미확인으로 되돌림
+      if (!/^[0-9A-Fa-f]{32}$/.test(String(it.unid || ""))) { out.results.push({ subject: it.subject, ok: false, why: "메일 ID 없음", wantUnread: true }); continue; }
+      const r = await page.fetch(`${MAILDB}/wcmdpost?createdocument`, {
+        method: "POST", headers: { "content-type": "application/x-www-form-urlencoded; charset=UTF-8" },
+        body: `actiontype=readflag_unread&postdata=${it.unid}`, timeout: 30000,
+      });
+      out.results.push({ subject: it.subject, unid: it.unid, http: r.status, wantUnread: true });
+      continue;
+    }
     if (!it.url || !it.url.startsWith(GW + "/")) { out.results.push({ subject: it.subject, ok: false, why: "주소 없음" }); continue; }
     const r = await page.fetch(it.url, { timeout: 30000 });
     out.results.push({ subject: it.subject, unid: it.unid, http: r.status });

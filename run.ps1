@@ -127,7 +127,7 @@ function Invoke-Summary {
 
   $template = Get-Content (Join-Path $Root 'summarize-prompt.md') -Raw -Encoding UTF8
   $chunkFile = Join-Path $Root 'pending-chunk.json'
-  $workAll = @(); $tasksAll = 0; $promoAll = 0; $doneCount = 0
+  $workAll = @(); $tasksAll = 0; $promoAll = 0; $doneCount = 0; $dangerAll = @()
 
   # 한 번에 너무 많이 넘기지 않도록 5통씩 나눠 요약 (하나가 실패해도 앞에서 끝난 묶음은 그대로 반영)
   for ($i = 0; $i -lt $items.Count; $i += $CHUNK_SIZE) {
@@ -181,27 +181,45 @@ function Invoke-Summary {
     [IO.File]::WriteAllText($Pending, (ConvertTo-Json @($remain) -Depth 4), [Text.UTF8Encoding]::new($false))
     $doneCount += $chunk.Count
 
-    # 그룹웨어 읽음 처리
-    $mr = @($chunk | Where-Object { $_.openUrl } | ForEach-Object { [pscustomobject]@{ unid = $_.unid; url = $_.openUrl; subject = $_.subject } })
+    $sum = Read-Json (Join-Path $Root 'last-ingest.json') $null
+    if ($sum) { $workAll += @($sum.work | ForEach-Object { $_ }); $tasksAll += [int]$sum.tasks; $promoAll += [int]$sum.promo; $dangerAll += @($sum.danger | Where-Object { $_ }) }
+    else { $workAll += @($chunk | ForEach-Object { $_.subject }) }
+    $dangerSet = @()
+    if ($sum -and $sum.dangerUnids) { $dangerSet = @($sum.dangerUnids | Where-Object { $_ }) }
+
+    # 그룹웨어 읽음 처리 · 의심 메일은 미확인으로 되돌려 그룹웨어에서도 눈에 띄게
+    $mr = @($chunk | Where-Object { $_.openUrl -or $_.unid } | ForEach-Object {
+      if ($dangerSet -contains $_.unid) { [pscustomobject]@{ unid = $_.unid; url = $_.openUrl; subject = $_.subject; unread = $true } }
+      elseif ($_.openUrl) { [pscustomobject]@{ unid = $_.unid; url = $_.openUrl; subject = $_.subject } }
+    } | Where-Object { $_ })
     if ($mr.Count -gt 0) {
       [IO.File]::WriteAllText((Join-Path $Root 'markread.json'), (ConvertTo-Json @($mr) -Compress -Depth 3), [Text.UTF8Encoding]::new($false))
       Invoke-Ego 'markread.mjs' 'markread' > $null
       $mres = Read-Json (Join-Path $Root 'last-markread.json') $null
       if ($mres) {
-        $okN = @($mres.results | Where-Object { $_.read -eq $true }).Count
-        $bad = @($mres.results | Where-Object { $_.read -ne $true } | ForEach-Object { $_.subject })
-        Write-Log ("그룹웨어 읽음 처리 {0}/{1}통{2}" -f $okN, $mr.Count, $(if ($bad.Count) { " · 안 됨: " + ($bad -join ', ') } else { '' }))
+        $readRows = @($mres.results | Where-Object { -not $_.wantUnread })
+        $unreadRows = @($mres.results | Where-Object { $_.wantUnread })
+        if ($readRows.Count) {
+          $okN = @($readRows | Where-Object { $_.read -eq $true }).Count
+          $bad = @($readRows | Where-Object { $_.read -ne $true } | ForEach-Object { $_.subject })
+          Write-Log ("그룹웨어 읽음 처리 {0}/{1}통{2}" -f $okN, $readRows.Count, $(if ($bad.Count) { " · 안 됨: " + ($bad -join ', ') } else { '' }))
+        }
+        if ($unreadRows.Count) {
+          $okU = @($unreadRows | Where-Object { $_.read -ne $true -and $_.unid }).Count
+          Write-Log ("의심 메일 미확인 유지 {0}/{1}통: {2}" -f $okU, $unreadRows.Count, (($unreadRows | ForEach-Object { $_.subject }) -join ', '))
+        }
       }
     }
-
-    $sum = Read-Json (Join-Path $Root 'last-ingest.json') $null
-    if ($sum) { $workAll += @($sum.work | ForEach-Object { $_ }); $tasksAll += [int]$sum.tasks; $promoAll += [int]$sum.promo }
-    else { $workAll += @($chunk | ForEach-Object { $_.subject }) }
   }
   Remove-Item $chunkFile -Force -ErrorAction SilentlyContinue
   if ($doneCount -eq 0) { return }
   Write-Log "요약 완료 ${doneCount}통 -> dashboard.html, 첨부 삭제"
 
+  # 의심 메일은 일반 알림과 따로 먼저 경고
+  if ($dangerAll.Count -gt 0) {
+    Show-Toast "⚠️ 의심 메일 $($dangerAll.Count)통 · 링크와 첨부를 열지 마세요" (($dangerAll -join ' / ') + "`n대시보드에서 근거를 확인하고 의심 해제 또는 위험 표시를 해 주세요.") $Dashboard
+    Write-Log "의심 메일 경고: $($dangerAll -join ', ')"
+  }
   # 업무 메일이 있을 때만 알림 (광고·뉴스레터만 왔으면 조용히 모아 둠)
   if ($workAll.Count -gt 0) {
     $title = "그룹웨어 새 메일 $($workAll.Count)통"
