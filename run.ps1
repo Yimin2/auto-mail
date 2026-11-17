@@ -58,9 +58,15 @@ function Read-Json($path, $default) {
 function Save-Json($path, $obj) {
   [IO.File]::WriteAllText($path, ($obj | ConvertTo-Json -Compress -Depth 5), [Text.UTF8Encoding]::new($false))
 }
-function Invoke-Ego($script, $name) {
+function Invoke-Ego($script, $name, $timeoutSec = 180) {
+  # -Wait 은 ego-browser 가 띄운 브라우저(자식 프로세스)까지 끝나길 기다려서 멈출 수 있음 -> 이 프로세스만, 제한 시간까지만 기다림
   $p = Start-Process -FilePath $Ego -ArgumentList @('nodejs', '-e', "`"await import('$RootUrl$script')`"") `
-       -WindowStyle Hidden -Wait -PassThru -RedirectStandardOutput (Join-Path $Root "$name.out") -RedirectStandardError (Join-Path $Root "$name.err")
+       -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $Root "$name.out") -RedirectStandardError (Join-Path $Root "$name.err")
+  if (-not $p.WaitForExit($timeoutSec * 1000)) {
+    try { $p.Kill() } catch {}
+    Write-Log "$script 이(가) ${timeoutSec}초 안에 끝나지 않아 중단했어요"
+    return -1
+  }
   return $p.ExitCode
 }
 function Test-Flag($name) { Test-Path (Join-Path $Flags $name) }

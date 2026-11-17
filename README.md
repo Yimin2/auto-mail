@@ -142,6 +142,12 @@ Windows 작업 스케줄러 (월~금 08:00~19:00, 1분마다)
    schtasks /Create /TN "GW-Mail-Summary" /TR "wscript.exe \"<이 폴더>\run.vbs\"" /SC WEEKLY /D MON,TUE,WED,THU,FRI /ST 08:00 /RI 1 /DU 11:00 /IT /F
    ```
 
+   등록한 뒤 작업 속성에서 **배터리에서도 실행**, **놓친 실행 바로 시작**, **실행 시간 10분 제한**을 켜 두면 노트북에서도 멈추지 않아요. PowerShell로 한 번에 바꾸려면:
+
+   ```
+   $t = Get-ScheduledTask GW-Mail-Summary; $s = $t.Settings; $s.ExecutionTimeLimit = "PT10M"; $s.StartWhenAvailable = $true; $s.DisallowStartIfOnBatteries = $false; $s.StopIfGoingOnBatteries = $false; Set-ScheduledTask GW-Mail-Summary -Settings $s
+   ```
+
    멈출 때는 `schtasks /Change /TN "GW-Mail-Summary" /DISABLE`을 실행합니다.
 
 처음 실행하면 최근 24시간 메일부터 가져옵니다.
