@@ -148,7 +148,9 @@ function Invoke-Summary {
 
     # 읽기 범위 제한: 작업 폴더를 inbox 로 두고 Read(./**) 만 허용 -> inbox 밖(설정·요약 데이터·사용자 파일)은 읽기 거부. Read 외 도구는 모두 금지
     Push-Location $Inbox
-    $summary = $prompt | & $claude -p --allowedTools 'Read(./**)' --disallowedTools 'Bash,PowerShell,Write,Edit,NotebookEdit,WebFetch,WebSearch,Task,Glob,Grep' --output-format text 2>$ClaudeErr | Out-String
+    # 요약 모델: config.json 의 claudeModel (없으면 Claude CLI 기본값)
+    $modelArgs = @(); if ($Cfg.claudeModel) { $modelArgs = @('--model', $Cfg.claudeModel) }
+    $summary = $prompt | & $claude -p @modelArgs --allowedTools 'Read(./**)' --disallowedTools 'Bash,PowerShell,Write,Edit,NotebookEdit,WebFetch,WebSearch,Task,Glob,Grep' --output-format text 2>$ClaudeErr | Out-String
     $code = $LASTEXITCODE
     Pop-Location
     if ($code -ne 0 -and -not $summary.Trim() -and (Test-Path $ClaudeErr)) { $summary = (Get-Content $ClaudeErr -Raw -Encoding UTF8) }

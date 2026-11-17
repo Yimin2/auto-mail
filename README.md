@@ -16,7 +16,7 @@ Windows 작업 스케줄러 (월~금 08:00~19:00, 1분마다)
     1. collect.mjs    ego 브라우저의 로그인 세션으로 그룹웨어 메일 API 호출 (토큰 0)
                       · 새 메일 본문(mail.md)·첨부 저장, PPT·Word·Excel 은 텍스트 추출
                       · 15분마다 첫 화면 새로고침으로 세션 유지, 새 메일이 많으면 다음 페이지까지
-    2. Claude CLI     새 메일이 있을 때만 5통씩 나눠 요약 (inbox/ 안 파일만 읽기 가능)
+    2. Claude CLI     새 메일이 있을 때만 5통씩 나눠 요약 (Sonnet 5.5, inbox/ 안 파일만 읽기 가능)
                       · 지침: summarize-prompt.md  · 출력: JSON(요약·할 일·근거·묶음·경고)
     3. build.js       data/mails.json 에 저장 → dashboard.html 다시 생성 → 첨부 삭제
     4. markread.mjs   그룹웨어에서 읽음 처리
@@ -131,6 +131,7 @@ Windows 작업 스케줄러 (월~금 08:00~19:00, 1분마다)
    | `meMatch` | 받는 사람/참조 목록에서 나를 찾는 정규식 (사번·메일 ID·이름) |
    | `userName` · `userLabel` | 요약 지침에 들어갈 내 이름 · "회사 팀 이름" |
    | `claudePath` | Claude CLI 실행 파일 경로 |
+   | `claudeModel` | 요약에 쓸 모델 (기본 `claude-sonnet-5-5`). 더 정확하게는 `claude-opus-5-5`, 더 싸게는 `claude-haiku-5-5`. 비워 두면 Claude CLI 기본값 |
    | `companyDomains` | (선택) 회사 메일 도메인 목록. 비워 두면 그룹웨어 주소에서 자동으로 정해요. 사칭 검사에 쓰여요 |
 
 2. ego 브라우저에서 그룹웨어에 로그인해 둡니다. ego lite를 기본 브라우저로 두면 알림을 눌렀을 때 대시보드가 ego에서 열리고, 체크 기록이 브리핑에 반영됩니다.

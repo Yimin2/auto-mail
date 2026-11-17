@@ -8,5 +8,6 @@
   "claudePath": "C:/path/to/claude-cli/claude.cmd",
   "companyDomains": [
     "example.com"
-  ]
+  ],
+  "claudeModel": "claude-sonnet-5-5"
 }
