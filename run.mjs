@@ -22,6 +22,7 @@ const KEEP_BODY_DAYS = 7, ATTACH_MAX_HOURS = 24; // 본문 보관 일수 · 첨�
 const FAIL_LIMIT = 3, PAUSE_MINUTES = 30;        // 요약 연속 실패 허용 · 휴식
 const CHUNK_SIZE = 5, COLLECT_ALERT_MIN = 10;    // 한 번에 요약할 메일 수 · 수집 실패 알림 기준(분)
 const EGO_TIMEOUT_SEC = 180, CLAUDE_TIMEOUT_SEC = 600;
+const LOGIN_REMIND_MIN = 30;                     // 로그인이 풀려 있는 동안 다시 알리는 간격(분)
 
 // ---------- 공통 도구 ----------
 const pad = (n) => String(n).padStart(2, "0");
@@ -89,20 +90,20 @@ const nodeBuild = (...args) => spawnSync(process.execPath, [P("build.js"), ...ar
 // ---------- 알림 (운영체제별) ----------
 function notify(title, body, openPath = null) {
   try {
-    const url = openPath && fs.existsSync(openPath) ? pathToFileURL(openPath).href : null;
+    const url = !openPath ? null : /^https?:\/\//.test(openPath) ? openPath : fs.existsSync(openPath) ? pathToFileURL(openPath).href : null;
     if (IS_WIN) {
       const ps = `
 $e = { param($s) [Security.SecurityElement]::Escape([string]$s) }
 [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null
 [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] > $null
 $launch = ''; if ($env:N_URL) { $launch = ' activationType="protocol" launch="' + (& $e $env:N_URL) + '"' }
-$hint = ''; if ($env:N_URL) { $hint = '<text>' + (& $e '클릭하면 할 일 대시보드가 열립니다') + '</text>' }
+$hint = ''; if ($env:N_URL) { $hint = '<text>' + (& $e $env:N_HINT) + '</text>' }
 $xml = New-Object Windows.Data.Xml.Dom.XmlDocument
 $xml.LoadXml('<toast' + $launch + '><visual><binding template="ToastGeneric"><text>' + (& $e $env:N_TITLE) + '</text><text>' + (& $e $env:N_BODY) + '</text>' + $hint + '</binding></visual></toast>')
 $id = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe'
 [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($id).Show([Windows.UI.Notifications.ToastNotification]::new($xml))`;
       spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(ps, "utf16le").toString("base64")],
-        { env: { ...process.env, N_TITLE: title, N_BODY: body, N_URL: url || "" }, windowsHide: true, timeout: 20000 });
+        { env: { ...process.env, N_TITLE: title, N_BODY: body, N_URL: url || "", N_HINT: /^https?:/.test(url || "") ? "클릭하면 그룹웨어 로그인 화면이 열립니다" : "클릭하면 할 일 대시보드가 열립니다" }, windowsHide: true, timeout: 20000 });
     } else if (IS_MAC) {
       const tn = which("terminal-notifier");
       if (tn) spawnSync(tn, ["-title", "auto-mail", "-subtitle", title, "-message", body, "-group", "auto-mail", ...(url ? ["-open", url] : [])], { timeout: 20000 });
@@ -122,21 +123,22 @@ function registerCollectFail(why) {
   const min = Math.floor((Date.now() - new Date(f.since).getTime()) / 60000);
   if (!f.notified && min >= COLLECT_ALERT_MIN) {
     notify("메일 수집이 멈췄어요", `${min}분째 메일을 못 가져오고 있어요. ego 브라우저가 켜져 있는지 확인해 주세요.\n${why || ""}`);
-    f.notified = true; log("수집 중단 알림");
+    f.notified = true; log("수집 중단 알림"); nodeBuild("render");
   }
   saveJson(COLLECT_FAIL, f);
 }
 function clearCollectFail() {
   if (!fs.existsSync(COLLECT_FAIL)) return;
   const f = readJson(COLLECT_FAIL, null); rm(COLLECT_FAIL);
-  if (f && f.notified) notify("메일 수집이 다시 돼요", "밀린 메일을 이어서 가져와요.");
+  if (f && f.notified) { notify("메일 수집이 다시 돼요", "밀린 메일을 이어서 가져와요."); nodeBuild("render"); }
   log("수집 복구");
 }
 
 // ---------- 1) 수집 (토큰 사용 없음) ----------
 async function collect() {
   const resultFile = P("last-result.json"); rm(resultFile);
-  const code = await ego("collect.mjs", "collect");
+  if (process.argv.includes("--fake-login-required")) saveJson(resultFile, { ok: false, loginRequired: true, newMails: [] }); // 시험용
+  const code = process.argv.includes("--fake-login-required") ? 0 : await ego("collect.mjs", "collect");
   if (!fs.existsSync(resultFile)) {
     let err = ""; try { err = fs.readFileSync(P("collect.err"), "utf8").trim(); } catch {}
     log(`수집 실패(exit ${code}): ${err.slice(0, 300)}`);
@@ -146,13 +148,25 @@ async function collect() {
   const res = readJson(resultFile, null);
   const loginFlag = P("login-required.flag");
   if (res.loginRequired) {
-    if (!fs.existsSync(loginFlag)) {
-      notify("그룹웨어 로그인 필요", `ego 브라우저에서 ${new URL(CFG.gwHost).host} 에 다시 로그인해 주세요.`);
-      fs.writeFileSync(loginFlag, "", "utf8"); log("로그인 필요");
+    const now = Date.now(), st = readJson(loginFlag, null);
+    const since = st && st.since ? new Date(st.since) : (fs.existsSync(loginFlag) ? new Date(fs.statSync(loginFlag).mtimeMs) : new Date());
+    const last = st && st.lastNotified ? new Date(st.lastNotified).getTime() : 0;
+    if (!st || now - last >= LOGIN_REMIND_MIN * 60000) {
+      const min = Math.floor((now - since.getTime()) / 60000);
+      const when = `${pad(since.getHours())}:${pad(since.getMinutes())}`;
+      notify(min < 1 ? "그룹웨어 로그인이 풀렸어요" : `그룹웨어 로그인 필요 · ${min}분째 메일 수집이 멈췄어요`,
+        `${when}부터 메일을 가져오지 못하고 있어요. ego 브라우저에서 다시 로그인해 주세요.`, CFG.gwHost.replace(/\/$/, "") + "/");
+      saveJson(loginFlag, { since: since.toISOString(), lastNotified: new Date(now).toISOString() });
+      log(st ? `로그인 필요 (${min}분째, 다시 알림)` : "로그인 필요");
+      if (!st) nodeBuild("render"); // 대시보드에 '수집 중단' 배너 표시
     }
     return res;
   }
-  if (fs.existsSync(loginFlag)) { rm(loginFlag); log("로그인 복구"); }
+  if (fs.existsSync(loginFlag)) {
+    const st = readJson(loginFlag, null); rm(loginFlag); log("로그인 복구");
+    if (st && st.since) notify("그룹웨어 로그인 확인", "밀린 메일을 이어서 가져와요.");
+    nodeBuild("render"); // 배너 내리기
+  }
   if (!res.ok) { log(`수집 오류: ${res.message}`); registerCollectFail(res.message); return res; }
   clearCollectFail();
   if (res.newMails.length) {

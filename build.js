@@ -357,6 +357,10 @@ function render() {
     m.gwUrl = unid && CFG.mailViewPath ? GW + CFG.mailViewPath.replace("{mailDb}", CFG.mailDb).replace("{unid}", unid) : null;
   }
   const data = JSON.stringify(mails).replace(/</g, "\\u003c");
+  // 수집 상태: 로그인 필요 / 수집 실패 (run.mjs 가 남기는 파일)
+  const loginSt = fs.existsSync(`${ROOT}/login-required.flag`) ? (readJson(`${ROOT}/login-required.flag`, null) || { since: new Date(fs.statSync(`${ROOT}/login-required.flag`).mtimeMs).toISOString() }) : null;
+  const failSt = readJson(`${ROOT}/collect-fail.json`, null);
+  const statusData = JSON.stringify({ loginSince: loginSt && loginSt.since || null, failSince: failSt && failSt.notified ? failSt.since : null }).replace(/</g, "\\u003c");
   const series = [...seriesGroups().entries()].map(([name, arr]) => ({
     name, items: arr.slice(0, 26).map((m) => ({ id: m.id, date: m.date, time: m.time, subject: m.subject, oneLine: m.oneLine,
       issue: m.series.issue, changes: m.series.changes || [], compared: !!m.series.compared, points: m.points || [] })),
@@ -408,6 +412,7 @@ function render() {
 <script>
 const MAILS = ${data};
 const SERIES = ${seriesData};
+const STATUS = ${statusData}; // 수집 중단 상태
 const GW_HOME = ${JSON.stringify(GW + "/")};
 const LATEST = new Set(SERIES.map(s => s.items[0].id)); // 묶음별 최신 회차
 const SERIES_N = {}; for (const s of SERIES) SERIES_N[s.name] = s.items.length; // 묶음별 회차 수
@@ -502,6 +507,10 @@ function render(){
     stat(warns.length, "확인할 의심 메일", warns.length ? "danger" : "");
 
   let alert = "";
+  const hm = iso => { const d = new Date(iso); return (d.toDateString() === new Date().toDateString() ? "" : (d.getMonth()+1) + "/" + d.getDate() + " ") + String(d.getHours()).padStart(2,"0") + ":" + String(d.getMinutes()).padStart(2,"0"); };
+  if(STATUS.loginSince) alert += '<div class="banner danger" role="alert">'+ICON.warn+'<div class="txt"><strong>메일 수집이 멈춰 있어요 · '+esc(hm(STATUS.loginSince))+'부터 그룹웨어 로그인 필요</strong>그룹웨어 로그인이 풀렸어요. ego 브라우저에서 다시 로그인하면 밀린 메일을 이어서 가져와요.</div><a class="act" href="'+esc(GW_HOME)+'" target="_blank" rel="noopener">그룹웨어 로그인 열기</a></div>';
+  else if(STATUS.failSince) alert += '<div class="banner danger" role="alert">'+ICON.warn+'<div class="txt"><strong>메일 수집이 멈춰 있어요 · '+esc(hm(STATUS.failSince))+'부터</strong>ego 브라우저가 켜져 있는지, PC가 절전 상태가 아닌지 확인해 주세요.</div></div>';
+  if(alert) alert += '<div style="height:var(--space-3)"></div>';
   if(dueToday.length) alert += '<div class="banner danger" role="alert">'+ICON.clock+'<div class="txt"><strong>오늘 마감인 일이 '+dueToday.length+'개 있어요</strong>'+esc(dueToday.map(t => t.text).join(" · "))+'</div></div>';
   if(warns.length) alert += '<div class="banner warning" role="status" style="margin-top:var(--space-3)">'+ICON.warn+'<div class="txt"><strong>확인이 필요한 의심 메일이 '+warns.length+'통 있어요</strong>열어 보고 의심 해제 또는 위험으로 표시해 주세요. '+esc(warns.map(m => m.subject).join(" · "))+'</div><a class="act" href="#'+esc(warns[0].id)+'" data-open="'+esc(warns[0].id)+'">확인하기</a></div>';
   document.getElementById("alert").innerHTML = alert;
