@@ -11,8 +11,8 @@
 ## 동작 흐름
 
 ```
-Windows 작업 스케줄러 (월~금 08:00~19:00, 1분마다)
- └ run.vbs (창 없이) → run.ps1
+예약 실행 (월~금 08:00~19:00, 1분마다)
+ └ Windows: 작업 스케줄러 → run.vbs → node run.mjs   ·   macOS: launchd → node run.mjs
     1. collect.mjs    ego 브라우저의 로그인 세션으로 그룹웨어 메일 API 호출 (토큰 0)
                       · 새 메일 본문(mail.md)·첨부 저장, PPT·Word·Excel 은 텍스트 추출
                       · 15분마다 첫 화면 새로고침으로 세션 유지, 새 메일이 많으면 다음 페이지까지
@@ -20,7 +20,7 @@ Windows 작업 스케줄러 (월~금 08:00~19:00, 1분마다)
                       · 지침: summarize-prompt.md  · 출력: JSON(요약·할 일·근거·묶음·경고)
     3. build.js       data/mails.json 에 저장 → dashboard.html 다시 생성 → 첨부 삭제
     4. markread.mjs   그룹웨어에서 읽음 처리
-    5. Windows 알림    업무 메일이 있을 때만 (누르면 대시보드가 열림)
+    5. 알림           업무 메일이 있을 때만 (Windows 알림 · Mac 알림, 누르면 대시보드)
     + 아침 9시 브리핑 · 오후 3시 마감 임박 알림 · 보관기간 정리 · 실패 감시
 ```
 
@@ -101,7 +101,8 @@ Windows 작업 스케줄러 (월~금 08:00~19:00, 1분마다)
 | **같은 그룹웨어를 쓰는 동료** | ✅ 거의 그대로 됩니다. `config.json`에 내 메일함 경로·이름만 넣으면 돼요 |
 | 다른 Domino 기반 그룹웨어 | ⚠️ 메일 목록 뷰 이름(`($inbox_all_portal)`), 문서 필드(`AuthorName` 등), 메일 보기 주소가 다르면 `collect.mjs`와 `mailViewPath`를 고쳐야 해요 |
 | Domino가 아닌 그룹웨어 (Outlook, Gmail 등) | ❌ 수집기(`collect.mjs`)를 새로 만들어야 해요. 요약, 대시보드, 알림 부분은 그대로 쓸 수 있어요 |
-| macOS · Linux | ❌ PowerShell, Windows 알림, 작업 스케줄러를 쓰기 때문에 Windows 전용이에요 |
+| macOS | ✅ `install-mac.sh`로 설치해요 (ego lite Mac 버전 필요) |
+| Linux | ⚠️ 실행 관리(run.mjs)는 동작하지만 예약 실행(cron)은 직접 등록해야 해요 |
 
 **각자 준비할 것**
 - Claude 계정: 요약 비용은 각자 부담해요. 메일 확인 자체에는 토큰이 들지 않아요
@@ -119,7 +120,9 @@ Windows 작업 스케줄러 (월~금 08:00~19:00, 1분마다)
 
 ## 설치
 
-**필요한 것:** Windows, Node.js, ego lite 브라우저(`ego-browser` CLI), Claude Code CLI
+**필요한 것:** Windows 또는 macOS, Node.js, ego lite 브라우저(`ego-browser` CLI), Claude Code CLI
+
+### 공통
 
 1. 이 저장소를 받고, `config.example.json`을 `config.json`으로 복사해서 내 값을 채웁니다. **`config.json`은 git에 올라가지 않습니다.**
 
@@ -130,26 +133,47 @@ Windows 작업 스케줄러 (월~금 08:00~19:00, 1분마다)
    | `mailViewPath` | 메일 한 통을 그룹웨어 화면으로 여는 주소 형식 (`{mailDb}`, `{unid}`가 치환됨) |
    | `meMatch` | 받는 사람/참조 목록에서 나를 찾는 정규식 (사번·메일 ID·이름) |
    | `userName` · `userLabel` | 요약 지침에 들어갈 내 이름 · "회사 팀 이름" |
-   | `claudePath` | Claude CLI 실행 파일 경로 |
+   | `claudePath` · `egoPath` | Claude CLI · ego-browser 실행 파일 경로. 비워 두면 자동으로 찾아요 (Mac 설치 스크립트가 채워 줘요) |
    | `claudeModel` | 요약에 쓸 모델 (기본 `claude-sonnet-5-5`). 더 정확하게는 `claude-opus-5-5`, 더 싸게는 `claude-haiku-5-5`. 비워 두면 Claude CLI 기본값 |
+   | `schedule` | (선택) 실행 시간대. 기본 `{"days":[1,2,3,4,5],"startHour":8,"endHour":19}` (요일: 0=일요일) |
    | `companyDomains` | (선택) 회사 메일 도메인 목록. 비워 두면 그룹웨어 주소에서 자동으로 정해요. 사칭 검사에 쓰여요 |
 
 2. ego 브라우저에서 그룹웨어에 로그인해 둡니다. ego lite를 기본 브라우저로 두면 알림을 눌렀을 때 대시보드가 ego에서 열리고, 체크 기록이 브리핑에 반영됩니다.
 3. Claude CLI를 설치하고 로그인합니다. `claude`를 실행한 뒤 `/login`을 입력하면 됩니다.
-4. (선택) 대시보드는 `ds/`에 들어 있는 디자인 시스템으로 그려집니다. 자신의 디자인 시스템(`tokens.json` · `components/bundle.css` · `fonts/PretendardVariable.woff2` 구성)으로 바꾸려면 `node tools/make-ds.js <디자인 시스템 project 폴더>`를 실행하세요. `ds/`가 새로 만들어집니다.
-5. 작업 스케줄러에 등록합니다. 월~금 08:00부터 11시간 동안 1분 간격으로 실행돼요:
+4. (선택) 대시보드는 `ds/`에 들어 있는 디자인 시스템으로 그려집니다. 자신의 디자인 시스템(`tokens.json` · `components/bundle.css` · `fonts/PretendardVariable.woff2` 구성)으로 바꾸려면 `node tools/make-ds.js <디자인 시스템 project 폴더>`를 실행하세요.
+5. 확인: `node run.mjs --check`(프로그램 경로), `node run.mjs --test-notify`(알림), `node run.mjs --now`(시간대와 관계없이 한 번 실행)
 
-   ```
-   schtasks /Create /TN "GW-Mail-Summary" /TR "wscript.exe \"<이 폴더>\run.vbs\"" /SC WEEKLY /D MON,TUE,WED,THU,FRI /ST 08:00 /RI 1 /DU 11:00 /IT /F
-   ```
+### Windows — 작업 스케줄러
 
-   등록한 뒤 작업 속성에서 **배터리에서도 실행**, **놓친 실행 바로 시작**, **실행 시간 10분 제한**을 켜 두면 노트북에서도 멈추지 않아요. PowerShell로 한 번에 바꾸려면:
+월~금 08:00부터 11시간 동안 1분 간격으로 `run.vbs`(창 없이 `node run.mjs` 실행)를 돌려요:
 
-   ```
-   $t = Get-ScheduledTask GW-Mail-Summary; $s = $t.Settings; $s.ExecutionTimeLimit = "PT10M"; $s.StartWhenAvailable = $true; $s.DisallowStartIfOnBatteries = $false; $s.StopIfGoingOnBatteries = $false; Set-ScheduledTask GW-Mail-Summary -Settings $s
-   ```
+```
+schtasks /Create /TN "GW-Mail-Summary" /TR "wscript.exe \"<이 폴더>\run.vbs\"" /SC WEEKLY /D MON,TUE,WED,THU,FRI /ST 08:00 /RI 1 /DU 11:00 /IT /F
+```
 
-   멈출 때는 `schtasks /Change /TN "GW-Mail-Summary" /DISABLE`을 실행합니다.
+노트북이라면 **배터리에서도 실행**, **놓친 실행 바로 시작**, **실행 시간 10분 제한**을 켜 두세요. PowerShell로 한 번에 바꾸려면:
+
+```
+$t = Get-ScheduledTask GW-Mail-Summary; $s = $t.Settings; $s.ExecutionTimeLimit = "PT10M"; $s.StartWhenAvailable = $true; $s.DisallowStartIfOnBatteries = $false; $s.StopIfGoingOnBatteries = $false; Set-ScheduledTask GW-Mail-Summary -Settings $s
+```
+
+멈출 때는 `schtasks /Change /TN "GW-Mail-Summary" /DISABLE`을 실행합니다.
+
+### macOS — launchd
+
+```
+chmod +x install-mac.sh
+./install-mac.sh
+```
+
+설치 스크립트가 하는 일:
+1. Node.js · ego-browser · Claude CLI 경로를 찾아 `config.json`에 기록
+2. `~/Library/LaunchAgents/com.automail.run.plist`를 만들어 **1분마다** `node run.mjs` 실행 (실행 시간대는 `schedule` 설정을 따름)
+3. 경로 확인과 시험 알림
+
+- 알림을 눌러 대시보드를 열려면 `brew install terminal-notifier`를 설치하세요. 없으면 기본 알림(누르기 동작 없음)을 써요.
+- 알림이 안 보이면 시스템 설정 > 알림에서 terminal-notifier(또는 스크립트 편집기) 알림을 켜세요.
+- 제거: `./install-mac.sh --uninstall`
 
 처음 실행하면 최근 24시간 메일부터 가져옵니다.
 
@@ -183,7 +207,9 @@ Windows 작업 스케줄러 (월~금 08:00~19:00, 1분마다)
 
 | 파일 | 역할 |
 |---|---|
-| `run.vbs` · `run.ps1` | 1분 주기 실행 진입점. 수집 → 요약 → 알림 → 브리핑 → 정리 |
+| `run.mjs` | 실행 관리 (Windows·Mac 공통): 수집 → 요약 → 알림 → 브리핑 → 정리, 실패 감시 |
+| `run.vbs` | Windows 작업 스케줄러용 진입점 (창 없이 `node run.mjs`) |
+| `install-mac.sh` | macOS 설치 (launchd 등록) |
 | `collect.mjs` | 새 메일 수집 (본문·첨부, office 텍스트 추출, 세션 유지, 페이지 넘기기) |
 | `summarize-prompt.md` | Claude 요약 지침 (`{{USER_NAME}}` 등은 실행할 때 config 값으로 바뀜) |
 | `build.js` | 요약 저장·보관, 반복 메일·대화 묶기, 브리핑 집계, 대시보드 생성 |
