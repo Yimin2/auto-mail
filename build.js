@@ -4,15 +4,18 @@
 const fs = require("fs");
 const path = require("path");
 
-const ROOT = __dirname.replace(/\\/g, "/");
+// AUTOMAIL_ROOT: 테스트에서 데이터 폴더를 따로 쓰기 위한 값 (평소에는 이 파일이 있는 폴더)
+const ROOT = (process.env.AUTOMAIL_ROOT || __dirname).replace(/\\/g, "/");
 const CFG = JSON.parse(fs.readFileSync(`${ROOT}/config.json`, "utf8").replace(/^﻿/, "")); // 개인 설정(그룹웨어 주소 등)
 const GW = String(CFG.gwHost || "").replace(/\/$/, "");
 const DATA = `${ROOT}/data/mails.json`;
 const OUT = `${ROOT}/dashboard.html`;
-const DS = `${ROOT}/ds`;
+const DS = `${__dirname.replace(/\\/g, "/")}/ds`;
 const KEEP_DAYS = 45;
 
 const readJson = (f, d) => { try { return JSON.parse(fs.readFileSync(f, "utf8").replace(/^\uFEFF/, "")); } catch { return d; } };
+// 읽음 확인(수신 확인) 메일: 반복 메일 묶음에 넣지 않는다
+const isReceipt = (subject) => /^\s*(수신\s*확인\s*(\(읽음\))?|읽음|read)\s*:/i.test(String(subject || ""));
 const idOf = (dir) => path.basename(String(dir || "")).replace(/[^\w가-힣-]/g, "_").slice(0, 80);
 
 // 요약은 지우지 않는다: 45일 지난 요약은 data/archive/YYYY-MM.json 으로 옮기고,
@@ -57,6 +60,8 @@ function ingest(rawFile, pendingFile) {
   const urlOf = new Map(pending.map((p) => [idOf(p.dir), p.openUrl || null]));
   const roleOf = new Map(pending.map((p) => [idOf(p.dir), p.role || null]));
   const riskOf = new Map(pending.map((p) => [idOf(p.dir), p.risk || null])); // 규칙 기반 보안 검사 결과
+  const addrOfId = new Map(pending.map((p) => [idOf(p.dir), p.fromAddr || null])); // 보낸 주소(판정 기록 찾기용)
+  const knownIds = new Set([...byId.keys(), ...allMails().map((m) => m.id)]); // threadOf·related 가 가리킬 수 있는 메일
   const kindOf = (t, role) => t.kind === "mine" || t.kind === "watch" ? t.kind : (role && role !== "수신" ? "watch" : "mine");
   if (parsed) {
     for (const m of parsed) {
@@ -66,7 +71,7 @@ function ingest(rawFile, pendingFile) {
         category: m.category === "promo" ? "promo" : "work",
         importance: ["high", "mid", "low"].includes(m.importance) ? m.importance : "mid",
         oneLine: m.oneLine || "", points: m.points || [], attachments: m.attachments || [],
-        role: roleOf.get(id) || null,
+        role: roleOf.get(id) || null, fromAddr: addrOfId.get(id) || null,
         risk: riskOf.get(id) || null,
         tasks: (m.tasks || []).map((t, i) => ({ id: `${id}#${i}`, text: t.text, due: t.due || null,
           kind: kindOf(t, roleOf.get(id)), owner: t.owner ? String(t.owner).slice(0, 40) : null, source: t.source && typeof t.source === "object" ? {
@@ -74,7 +79,13 @@ function ingest(rawFile, pendingFile) {
           quote: t.source.quote ? String(t.source.quote).slice(0, 200) : null, why: t.source.why ? String(t.source.why).slice(0, 300) : null } : null })),
         warning: m.warning || (riskOf.get(id) && riskOf.get(id).level === "high" ? "피싱 의심: " + riskOf.get(id).reasons.join(", ") : null), addedAt: now,
         threadNew: (m.threadNew || []).map((c) => String(c).slice(0, 120)).slice(0, 4),
-        series: m.series && m.series.name ? { name: String(m.series.name).slice(0, 40), issue: m.series.issue ? String(m.series.issue).slice(0, 30) : null,
+        // 본문에 인용된 이전 메일(받은편지함에 없는 내 답장 등) · 같은 대화로 이어지는 예전 메일 · 관련 있는 다른 대화
+        quoted: (Array.isArray(m.quoted) ? m.quoted : []).filter((q) => q && /^\d{4}-\d{2}-\d{2}$/.test(String(q.date || ""))).slice(0, 6).map((q) => ({
+          date: String(q.date), time: /^\d{2}:\d{2}$/.test(String(q.time || "")) ? String(q.time) : null, from: String(q.from || "").slice(0, 40), oneLine: String(q.oneLine || "").slice(0, 80) })),
+        threadOf: m.threadOf && knownIds.has(String(m.threadOf)) && String(m.threadOf) !== id ? String(m.threadOf) : null,
+        related: (Array.isArray(m.related) ? m.related : []).filter((r) => r && knownIds.has(String(r.id)) && String(r.id) !== id).slice(0, 3)
+          .map((r) => ({ id: String(r.id), why: r.why ? String(r.why).slice(0, 80) : null })),
+        series: m.series && m.series.name && !isReceipt(m.subject) ? { name: String(m.series.name).slice(0, 40), issue: m.series.issue ? String(m.series.issue).slice(0, 30) : null,
           changes: (m.series.changes || []).map((c) => String(c).slice(0, 120)).slice(0, 4), compared: m.series.compared === true || m.series.compared === "true" } : null,
       });
     }
@@ -103,7 +114,7 @@ function ingest(rawFile, pendingFile) {
     const name = m.series && m.series.name;
     for (const b of (name && m.series.backfill) || []) {
       const old = byId.get(b && b.id);
-      if (old && !(old.series && old.series.name)) old.series = { name: String(name).slice(0, 40), issue: b.issue ? String(b.issue).slice(0, 30) : null, changes: [] };
+      if (old && !(old.series && old.series.name) && !isReceipt(old.subject)) old.series = { name: String(name).slice(0, 40), issue: b.issue ? String(b.issue).slice(0, 30) : null, changes: [] };
     }
   }
   fs.mkdirSync(path.dirname(DATA), { recursive: true });
@@ -133,16 +144,21 @@ function threadKey(subject) {
   return s.replace(/\s+/g, " ").trim().toLowerCase();
 }
 const isReply = (subject) => threadKey(subject) !== String(subject || "").replace(/\s+/g, " ").trim().toLowerCase();
+// 같은 대화: 머리말을 뗀 제목이 같거나, Claude 가 인용 원문을 보고 threadOf 로 이은 메일. 한 통짜리 대화도 돌려준다(인용된 이전 메일을 보여 주려고)
 function threadGroups() {
-  const g = new Map();
-  for (const m of allMails()) {
-    if (m.series && m.series.name) continue; // 반복 메일은 반복 메일 칸에서 묶는다
+  const list = allMails().filter((m) => !(m.series && m.series.name && !isReceipt(m.subject))); // 반복 메일은 반복 메일 칸에서 묶는다
+  const byId = new Map(list.map((m) => [m.id, m])), parent = new Map(list.map((m) => [m.id, m.id]));
+  const find = (x) => { while (parent.get(x) !== x) { parent.set(x, parent.get(parent.get(x))); x = parent.get(x); } return x; };
+  const union = (a, b) => { if (byId.has(a) && byId.has(b)) parent.set(find(a), find(b)); };
+  const firstBySubject = new Map();
+  for (const m of list) {
     const k = threadKey(m.subject);
-    if (!k) continue;
-    if (!g.has(k)) g.set(k, []);
-    g.get(k).push(m);
+    if (k) { if (firstBySubject.has(k)) union(m.id, firstBySubject.get(k)); else firstBySubject.set(k, m.id); }
+    if (m.threadOf) union(m.id, m.threadOf);
   }
-  for (const [k, arr] of g) { if (arr.length < 2) g.delete(k); else arr.sort((a, b) => (b.date + b.time).localeCompare(a.date + a.time)); }
+  const g = new Map();
+  for (const m of list) { const r = find(m.id); if (!g.has(r)) g.set(r, []); g.get(r).push(m); }
+  for (const arr of g.values()) arr.sort((a, b) => (b.date + b.time).localeCompare(a.date + a.time));
   return g;
 }
 // 요약 지침에 넣을 "앞선 대화" (이번에 요약할 답장 메일의 이전 메일들)
@@ -161,6 +177,40 @@ function threadContext(pendingFile) {
   console.log(out.length ? out.join("\n") : "(없음)");
 }
 
+// 요약 지침에 넣을 "최근 메일" (같은 대화 잇기 threadOf · 관련 대화 related 의 후보)
+function recentContext() {
+  const cut = new Date(Date.now() - 30 * 864e5).toISOString().slice(0, 10);
+  const list = readJson(DATA, []).filter((m) => m.date >= cut && m.category !== "promo" && !isReceipt(m.subject) && !(m.series && m.series.name))
+    .sort((a, b) => (b.date + b.time).localeCompare(a.date + a.time)).slice(0, 60);
+  console.log(list.length ? list.map((m) => `- ${m.id} | ${m.date} ${m.time} | ${nameOf(m.from)} | ${m.subject} | ${m.oneLine}`).join("\n") : "(없음)");
+}
+
+// 요약 지침에 넣을 "보낸 사람 판정 기록": 같은 보낸 사람의 예전 경고 메일을 사용자가 정상/위험으로 판정한 기록
+// 주소가 양쪽에 있으면 주소로, 예전 메일에 주소가 없으면 이름으로 찾는다(이름만 같으면 그렇게 밝힌다)
+const addrOf = (s) => ((String(s || "").match(/[\w.+-]+@[\w.-]+\.[a-z]{2,}/i) || [])[0] || "").toLowerCase() || null;
+const nameOf = (s) => String(s || "").split("·")[0].replace(/"/g, "").trim();
+function senderContext(pendingFile) {
+  const pending = [].concat(readJson(pendingFile, []));
+  const flag = readJson(`${ROOT}/data/marks.json`, {}).flag || {};
+  const all = allMails(), out = [];
+  for (const p of pending) {
+    const pa = p.fromAddr || addrOf(p.from), pn = nameOf(p.from);
+    const same = all.filter((m) => {
+      if (m.dir && m.dir === p.dir) return false;
+      const ma = m.fromAddr || addrOf(m.from);
+      return pa && ma ? ma === pa : !!pn && nameOf(m.from) === pn;
+    });
+    const judged = same.filter((m) => m.warning && flag[m.id] && flag[m.id].v).sort((a, b) => (b.date + b.time).localeCompare(a.date + a.time)).slice(0, 5);
+    if (!judged.length) continue;
+    out.push(`- 대상: ${p.dir}\n  보낸 사람: ${pn}${pa ? ` <${pa}>` : ""} · 예전 메일 ${same.length}통\n` + judged.map((m) => {
+      const ma = m.fromAddr || addrOf(m.from);
+      return `  · ${m.date} "${m.subject}" — 그때 경고: ${String(m.warning).slice(0, 100)} → 사용자 판정: ${flag[m.id].v === "safe" ? "정상(의심 해제)" : "위험"}` +
+        ` (${pa && ma ? "보낸 주소 같음" : "이름만 같음, 주소 확인 못 함"})`;
+    }).join("\n"));
+  }
+  console.log(out.length ? out.join("\n") : "(없음)");
+}
+
 // 반복 메일 묶음: 대시보드 데이터 + 월별 보관 파일 전체에서 모은다
 function allMails() {
   const list = [...readJson(DATA, [])];
@@ -171,7 +221,7 @@ function seriesGroups() {
   const g = new Map();
   for (const m of allMails()) {
     const name = m.series && m.series.name;
-    if (!name) continue;
+    if (!name || isReceipt(m.subject)) continue; // 예전에 묶인 수신 확인 메일도 빼고 보여 준다
     if (!g.has(name)) g.set(name, []);
     g.get(name).push(m);
   }
@@ -186,7 +236,7 @@ function seriesContext() {
     `  · ${(m.series && m.series.issue) || "-"} (${m.date} ${m.time}) | ${m.oneLine}\n    핵심: ${(m.points || []).slice(0, 5).join(" / ")}`).join("\n")).join("\n") : "(아직 없음)");
   // 새 묶음을 만들 때 소급해서 넣을 수 있도록, 최근 30일 동안 묶음 없는 메일 목록도 준다
   const cut = new Date(Date.now() - 30 * 864e5).toISOString().slice(0, 10);
-  const loose = readJson(DATA, []).filter((m) => !(m.series && m.series.name) && m.date >= cut && m.category !== "promo")
+  const loose = readJson(DATA, []).filter((m) => !(m.series && m.series.name) && m.date >= cut && m.category !== "promo" && !isReceipt(m.subject))
     .sort((a, b) => (b.date + b.time).localeCompare(a.date + a.time)).slice(0, 40);
   console.log("\n최근 묶음 없는 메일(id | 날짜 | 보낸 사람 | 제목 | 요약):");
   console.log(loose.length ? loose.map((m) => `- ${m.id} | ${m.date} ${m.time} | ${String(m.from || "").split("·")[0].trim()} | ${m.subject} | ${m.oneLine} / ${(m.points || []).slice(0, 3).join(" / ")}`).join("\n") : "(없음)");
@@ -353,6 +403,7 @@ function render() {
   const mails = readJson(DATA, []);
   // 그룹웨어 메일 보기 주소 (포털 wfrmpage 가 메일 문서를 팝업 화면으로 감싸서 보여줌)
   for (const m of mails) {
+    if (isReceipt(m.subject)) delete m.series; // 읽음 확인 메일은 묶음 표시 없이 (화면용 사본에서만)
     const unid = (String(m.url || "").match(/\/0\/([0-9A-Fa-f]{32})/) || [])[1];
     m.gwUrl = unid && CFG.mailViewPath ? GW + CFG.mailViewPath.replace("{mailDb}", CFG.mailDb).replace("{unid}", unid) : null;
   }
@@ -367,18 +418,43 @@ function render() {
   })).sort((a, b) => (b.items[0].date + b.items[0].time).localeCompare(a.items[0].date + a.items[0].time)); // 가장 최근에 받은 묶음이 위
   const seriesData = JSON.stringify(series).replace(/</g, "\\u003c");
   const inDash = new Set(mails.map((m) => m.id));
-  const threads = {};
+  const threads = {}, cardOf = new Map(), groupOf = new Map(), everyMail = new Map(allMails().map((m) => [m.id, m]));
   for (const arr of threadGroups().values()) {
     const latest = arr.find((m) => inDash.has(m.id));
     if (!latest) continue;
-    threads[latest.id] = arr.slice(0, 30).map((m) => ({ id: m.id, date: m.date, time: m.time, from: m.from, oneLine: m.oneLine, threadNew: m.threadNew || [], here: inDash.has(m.id) }));
+    for (const m of arr) { cardOf.set(m.id, latest.id); groupOf.set(m.id, arr); }
+    const rows = arr.map((m) => ({ id: m.id, date: m.date, time: m.time, from: m.from, oneLine: m.oneLine, threadNew: m.threadNew || [], here: inDash.has(m.id) }));
+    // 인용으로만 확인된 메일: 받은 메일과 날짜·보낸 사람이 같고 시각이 같으면(시각을 모르면 날짜·이름만) 같은 메일로 보고 뺀다
+    const same = (a, b) => a.date === b.date && nameOf(a.from) === nameOf(b.from) && (!a.time || !b.time || a.time === b.time);
+    for (const m of arr) for (const q of m.quoted || []) {
+      if (rows.some((r) => same(r, q))) continue;
+      rows.push({ id: null, date: q.date, time: q.time || "", from: q.from, oneLine: q.oneLine, threadNew: [], here: false, quoted: true });
+    }
+    if (rows.length < 2) continue;
+    rows.sort((a, b) => (b.date + (b.time || "00:00")).localeCompare(a.date + (a.time || "00:00")));
+    threads[latest.id] = rows.slice(0, 30);
   }
+  // 관련 대화: 대화 카드 단위로 양쪽에 보여 준다 (같은 대화 안의 메일끼리는 빼고)
+  const related = {};
+  const addRel = (fromId, toId, why) => {
+    const a = cardOf.get(fromId) || (inDash.has(fromId) ? fromId : null);
+    const b = cardOf.get(toId) || (inDash.has(toId) ? toId : null);
+    const target = everyMail.get(toId); if (!a || !target || a === b) return;
+    const list = (related[a] ||= []);
+    if (list.some((x) => (b && x.card === b) || x.id === toId)) return;
+    list.push({ id: toId, card: b, subject: (groupOf.get(toId) || [target])[0].subject, date: target.date, why: why || null });
+  };
+  for (const m of everyMail.values()) for (const r of m.related || []) { addRel(m.id, r.id, r.why); addRel(r.id, m.id, r.why); }
+  const relatedData = JSON.stringify(related).replace(/</g, "\\u003c");
   const threadData = JSON.stringify(threads).replace(/</g, "\\u003c");
   const built = new Date(Date.now() + 9 * 3600e3).toISOString().replace("T", " ").slice(0, 16);
-  const ds = ["font.css", "tokens.css", "bundle.css"].map((f) => { try { return fs.readFileSync(`${DS}/${f}`, "utf8"); } catch { return ""; } }).join("\n");
+  // 글꼴(2.7MB)은 매번 넣지 않고 ds/font.css 를 링크로 건다 (대시보드는 이 폴더에서 바로 여는 파일이라 상대 경로가 맞음)
+  const ds = ["tokens.css", "bundle.css"].map((f) => { try { return fs.readFileSync(`${DS}/${f}`, "utf8"); } catch { return ""; } }).join("\n");
+  const fontHref = path.relative(path.dirname(OUT), `${DS}/font.css`).split(path.sep).join("/");
   fs.writeFileSync(OUT, `<!doctype html>
 <html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>메일 할 일</title>
+<link rel="stylesheet" href="${fontHref}">
 <style>${ds}</style>
 <style>${PAGE_CSS}</style>
 </head>
@@ -416,9 +492,10 @@ const STATUS = ${statusData}; // 수집 중단 상태
 const GW_HOME = ${JSON.stringify(GW + "/")};
 const LATEST = new Set(SERIES.map(s => s.items[0].id)); // 묶음별 최신 회차
 const SERIES_N = {}; for (const s of SERIES) SERIES_N[s.name] = s.items.length; // 묶음별 회차 수
-const THREADS = ${threadData}; // 대화 묶음: 최신 메일 id -> 대화 전체(최신순)
+const THREADS = ${threadData}; // 대화 묶음: 최신 메일 id -> 대화 전체(최신순, 인용으로만 확인된 메일 포함)
+const RELATED = ${relatedData}; // 관련 대화: 대화 카드 id -> [{ id, card, subject, date, why }]
 const OPENMAP = {}; // 목록에서 숨긴 대화 속 메일 -> 최신 메일
-for (const [lid, arr] of Object.entries(THREADS)) for (const it of arr) if (it.id !== lid) OPENMAP[it.id] = lid;
+for (const [lid, arr] of Object.entries(THREADS)) for (const it of arr) if (it.id && it.id !== lid) OPENMAP[it.id] = lid;
 const store = {
   get(k){ try { return JSON.parse(localStorage.getItem(k) || "null"); } catch { return null; } },
   set(k,v){ try { localStorage.setItem(k, JSON.stringify(v)); } catch {} }
@@ -582,6 +659,8 @@ function mailItem(m, prefix){
   const th = THREADS[m.id];
   if((m.tasks||[]).length) tags.push('<span class="tag">할 일 '+m.tasks.length+'</span>');
   if(th) tags.push('<span class="tag">대화 '+th.length+'통</span>');
+  const rel = RELATED[m.id] || [];
+  if(rel.length) tags.push('<span class="tag">관련 대화 '+rel.length+'</span>');
   const sN = m.series && m.series.name ? (SERIES_N[m.series.name] || 1) : 0;
   if(sN) tags.push('<span class="tag">'+esc(m.series.name)+(m.series.issue ? ' · '+esc(m.series.issue) : '')+(sN > 1 ? ' · '+sN+'회차' : '')+'</span>');
   if((m.attachments||[]).length) tags.push('<span class="tag">첨부 '+m.attachments.length+'</span>');
@@ -591,6 +670,12 @@ function mailItem(m, prefix){
     fl === "danger" ? '<span class="badge danger"><span class="dot"></span>위험 메일</span>' :
     '<span class="badge warning"><span class="dot"></span>'+esc(wTitle)+' · 확인 필요</span>');
   if(!m.warning && m.risk && m.risk.level === "mid") tags.push('<span class="badge warning"><span class="dot"></span>보안 주의</span>');
+  // 대화로 묶이면 앞선 메일은 목록에서 숨는다. 그 메일에 의심 경고가 있으면 이 카드에서 판정할 수 있게 함께 보여 준다
+  const tw = (th || []).filter(it => it.id !== m.id).map(it => MAILS.find(x => x.id === it.id)).filter(x => x && x.warning);
+  const twOpen = tw.filter(x => !flagOf(x)).length;
+  if(twOpen && !(m.warning && !fl)) tags.push('<span class="badge warning"><span class="dot"></span>대화 속 의심 메일 '+twOpen+'통 · 확인 필요</span>');
+  const threadWarn = tw.map(x => '<div class="blk"><h3>대화 속 앞선 메일 · '+esc(md(x.date))+' '+esc(x.time)+' · '+esc((x.from||"").split("·")[0].trim())+'</h3></div>'+
+    warnBlock(x, flagOf(x), x.warning.split(":")[0])).join("");
   const blk = (title, arr) => arr && arr.length ? '<div class="blk"><h3>'+title+'</h3><ul>'+arr.map(x => '<li>'+x+'</li>').join("")+'</ul></div>' : "";
   return '<details id="'+esc((prefix || "")+m.id)+'"><summary>'+
     '<span class="m-main"><span class="m-head"><span class="badge '+cls+'"><span class="dot"></span>'+txt+'</span><span class="m-subj">'+esc(m.subject)+'</span></span>'+
@@ -599,14 +684,16 @@ function mailItem(m, prefix){
     '</summary><div class="body"><div class="from-row"><span class="from">보낸 사람 · '+esc(m.from)+'</span>'+
     '<span class="open-btns">'+(sN > 1 ? '<button type="button" class="btn ghost" data-series="'+esc(m.series.name)+'">회차 기록 보기 · '+sN+'회차</button>' : '')+
     '<a class="btn secondary" href="'+esc(m.gwUrl || GW_HOME)+'" target="_blank" rel="noopener">'+(m.gwUrl ? "그룹웨어에서 열기" : "그룹웨어 열기")+'</a></span></div>'+
-    (m.warning ? warnBlock(m, fl, wTitle) : riskList(m))+
+    (m.warning ? warnBlock(m, fl, wTitle) : riskList(m))+threadWarn+
     blk("할 일", (m.tasks||[]).map(t => t.superseded ? '<s>'+esc(t.text)+'</s> <span class="badge"><span class="dot"></span>변경됨</span>'+(t.superseded.why ? '<br><span class="hint">'+esc(t.superseded.why)+'</span>' : "") : esc(t.text)+(t.due?' · '+esc(md(t.due))+'까지':"")+(t.kind === "watch" ? ' · 지켜볼 일(담당 '+esc(t.owner || "미정")+')' : '')+'<br>'+srcInfo(t.source))) +
     ((m.threadNew||[]).length ? '<div class="blk"><h3>이번 답장에서 새로 나온 내용</h3><ul class="t-new">'+m.threadNew.map(x => '<li>'+esc(x)+'</li>').join("")+'</ul></div>' : '') +
     blk("핵심 내용", (m.points||[]).map(esc)) +
     (th ? '<div class="blk"><h3>대화 흐름 · '+th.length+'통</h3><ol class="t-flow">'+th.map((it, i) =>
       '<li class="'+(i===0?"now":"")+'"><span class="t-when">'+esc(md(it.date))+' '+esc(it.time)+'</span><span class="t-body"><b>'+esc((it.from||"").split("·")[0].trim())+'</b> '+esc(it.oneLine)+
       (it.threadNew.length ? '<span class="t-sub">새 내용: '+it.threadNew.map(esc).join(" · ")+'</span>' : '')+
-      (it.here ? '' : '<span class="t-sub">월별 보관 파일에 있어요</span>')+'</span></li>').join("")+'</ol></div>' : '') +
+      (it.quoted ? '<span class="t-sub">받은편지함에는 없고 인용으로만 확인</span>' : it.here ? '' : '<span class="t-sub">월별 보관 파일에 있어요</span>')+'</span></li>').join("")+'</ol></div>' : '') +
+    (rel.length ? '<div class="blk"><h3>관련 대화</h3><ul>'+rel.map(r => '<li>'+(r.card ? '<a href="#'+esc(r.card)+'" data-open="'+esc(r.card)+'">'+esc(r.subject)+'</a>' : esc(r.subject)+' <span class="hint">(월별 보관 파일)</span>')+
+      ' <span class="hint">· '+esc(md(r.date))+(r.why ? ' · '+esc(r.why) : '')+'</span></li>').join("")+'</ul></div>' : '') +
     blk("첨부", (m.attachments||[]).map(esc)) +
     '</div></details>';
 }
@@ -719,7 +806,7 @@ document.addEventListener("click", e => {
     if(f.dataset.v) flagMap[id] = { v: f.dataset.v, at: new Date().toISOString() }; else delete flagMap[id];
     store.set("gwmail.flag", flagMap);
     render(); renderMails();
-    const d = document.getElementById(id); if(d) d.open = true;
+    const d = document.getElementById(OPENMAP[id] || id); if(d) d.open = true; // 대화 속 메일이면 대화 카드를 펼친 채로
     return;
   }
   const a = e.target.closest("[data-open]"); if(!a) return;
@@ -752,4 +839,6 @@ if (cmd === "ingest") { ingest(a1, a2); render(); }
 else if (cmd === "brief") brief();
 else if (cmd === "series-context") seriesContext();
 else if (cmd === "thread-context") threadContext(a1);
+else if (cmd === "sender-context") senderContext(a1);
+else if (cmd === "recent-context") recentContext();
 else render();

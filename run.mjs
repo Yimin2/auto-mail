@@ -23,6 +23,8 @@ const FAIL_LIMIT = 3, PAUSE_MINUTES = 30;        // 요약 연속 실패 허용 
 const CHUNK_SIZE = 5, COLLECT_ALERT_MIN = 10;    // 한 번에 요약할 메일 수 · 수집 실패 알림 기준(분)
 const EGO_TIMEOUT_SEC = 180, CLAUDE_TIMEOUT_SEC = 600;
 const LOGIN_REMIND_MIN = 30;                     // 로그인이 풀려 있는 동안 다시 알리는 간격(분)
+const LOCK_STALE_MIN = 60;                       // 잠금이 이 시간 동안 갱신되지 않으면 멈춘 실행으로 봄(분)
+const BRIEF_TRIES = 3;                           // 체크 기록을 못 읽었을 때 브리핑을 미루며 다시 시도하는 횟수
 
 // ---------- 공통 도구 ----------
 const pad = (n) => String(n).padStart(2, "0");
@@ -36,6 +38,7 @@ const readJson = (f, d) => { try { return JSON.parse(fs.readFileSync(f, "utf8").
 const saveJson = (f, o) => fs.writeFileSync(f, JSON.stringify(o, null, 1), "utf8");
 const hasFlag = (n) => fs.existsSync(path.join(FLAGS, n));
 const setFlag = (n) => fs.writeFileSync(path.join(FLAGS, n), "", "utf8");
+const bumpTry = (n) => { const f = path.join(FLAGS, n); let c = 0; try { c = Number(fs.readFileSync(f, "utf8")) || 0; } catch {} fs.writeFileSync(f, String(c + 1), "utf8"); return c + 1; };
 const rm = (f) => { try { fs.rmSync(f, { recursive: true, force: true }); } catch {} };
 
 function which(cmd) {
@@ -86,6 +89,28 @@ async function ego(script, name) {
   return r.code;
 }
 const nodeBuild = (...args) => spawnSync(process.execPath, [P("build.js"), ...args], { cwd: ROOT, encoding: "utf8", windowsHide: true });
+// 대시보드 파일이 없으면 만든다 (새 메일이 없던 날에도 체크 기록 읽기·알림 열기가 되도록)
+function ensureDashboard() {
+  if (fs.existsSync(DASHBOARD)) return true;
+  const r = nodeBuild("render");
+  if (r.status !== 0) log(`대시보드 생성 실패: ${(r.stderr || "").trim().slice(0, 200)}`);
+  else log("대시보드 파일이 없어 새로 만들었어요");
+  return fs.existsSync(DASHBOARD);
+}
+// macOS: 대시보드·그룹웨어 로그인은 ego lite 에서 열어야 체크 기록과 로그인 세션이 맞는다
+function egoApp() {
+  if (!IS_MAC) return null;
+  const c = [CFG.egoApp, "/Applications/ego lite.app", path.join(os.homedir(), "Applications/ego lite.app")];
+  return c.find((p) => p && fs.existsSync(p)) || null;
+}
+function openTarget(target) {
+  const app = egoApp();
+  if (IS_MAC) return spawnSync("open", app ? ["-a", app, target] : [target], { timeout: 20000 }).status === 0;
+  if (IS_WIN) return spawnSync("cmd", ["/c", "start", "", target], { windowsHide: true, timeout: 20000 }).status === 0;
+  return spawnSync("xdg-open", [target], { timeout: 20000 }).status === 0;
+}
+// 실행이 길어질 때 다른 실행이 끼어들지 않도록 잠금 시각을 새로 고침
+const touchLock = () => { try { fs.writeFileSync(LOCK, JSON.stringify({ pid: process.pid, at: new Date().toISOString() }), "utf8"); } catch {} };
 
 // ---------- 알림 (운영체제별) ----------
 function notify(title, body, openPath = null) {
@@ -106,7 +131,9 @@ $id = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershe
         { env: { ...process.env, N_TITLE: title, N_BODY: body, N_URL: url || "", N_HINT: /^https?:/.test(url || "") ? "클릭하면 그룹웨어 로그인 화면이 열립니다" : "클릭하면 할 일 대시보드가 열립니다" }, windowsHide: true, timeout: 20000 });
     } else if (IS_MAC) {
       const tn = which("terminal-notifier");
-      if (tn) spawnSync(tn, ["-title", "auto-mail", "-subtitle", title, "-message", body, "-group", "auto-mail", ...(url ? ["-open", url] : [])], { timeout: 20000 });
+      const sh = (s) => `'${String(s).replace(/'/g, "'\\''")}'`;
+      const click = !url ? [] : egoApp() ? ["-execute", `open -a ${sh(egoApp())} ${sh(url)}`] : ["-open", url];
+      if (tn) spawnSync(tn, ["-title", "auto-mail", "-subtitle", title, "-message", body, "-group", "auto-mail", ...click], { timeout: 20000 });
       else {
         const esc = (s) => String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
         spawnSync("osascript", ["-e", `display notification "${esc(body)}" with title "auto-mail" subtitle "${esc(title)}"`], { timeout: 20000 });
@@ -169,6 +196,9 @@ async function collect() {
   }
   if (!res.ok) { log(`수집 오류: ${res.message}`); registerCollectFail(res.message); return res; }
   clearCollectFail();
+  for (const f of res.failed || []) log(`메일 읽기 실패 ${f.tries}회째(다음 실행에 다시 시도): ${f.subject} - ${f.why}`);
+  for (const f of res.skipped || []) log(`메일 읽기 계속 실패해 건너뜀: ${f.subject} - ${f.why}`);
+  if ((res.skipped || []).length) notify(`메일 ${res.skipped.length}통을 가져오지 못했어요`, `${res.skipped.map((f) => f.subject).join(" / ")}\n그룹웨어에서 직접 확인해 주세요.`);
   if (res.newMails.length) {
     log(`새 메일 ${res.newMails.length}통 수집`);
     for (const rc of res.readCheck || []) log(`  읽음상태 진단: 수집 전 ${rc.before ? "읽음" : "미확인"} -> 후 ${rc.after ? "읽음" : rc.after === false ? "미확인" : "?"} | ${rc.subject}`);
@@ -185,6 +215,7 @@ async function summarize() {
   const claude = claudePath();
   if (!claude) { log("Claude CLI 없음 - 요약 건너뜀"); return; }
 
+  await ego("marks.mjs", "marks"); // 보관 정리 전에 최신 체크 기록 반영
   const template = fs.readFileSync(P("summarize-prompt.md"), "utf8").replace(/^﻿/, "");
   const chunkFile = P("pending-chunk.json");
   const WD = ["일", "월", "화", "수", "목", "금", "토"], now = new Date();
@@ -192,11 +223,16 @@ async function summarize() {
   let workAll = [], tasksAll = 0, promoAll = 0, doneCount = 0, dangerAll = [];
 
   while (items.length) {
+    touchLock();
     const chunk = items.slice(0, CHUNK_SIZE);
     saveJson(chunkFile, chunk);
     const seriesCtx = (nodeBuild("series-context").stdout || "").trim() || "(아직 없음)";
     const threadCtx = (nodeBuild("thread-context", chunkFile).stdout || "").trim() || "(없음)";
-    const prompt = template.replace("{{TODAY}}", today).replace("{{SERIES}}", seriesCtx).replace("{{THREADS}}", threadCtx)
+    const senderCtx = (nodeBuild("sender-context", chunkFile).stdout || "").trim() || "(없음)";
+    const recentCtx = (nodeBuild("recent-context").stdout || "").trim() || "(없음)";
+    // split/join: 요약 문장에 "$&" 같은 글자가 있어도 replace 특수 패턴으로 바뀌지 않게
+    const fill = (t, k, v) => t.split(k).join(v);
+    const prompt = fill(fill(fill(fill(template, "{{TODAY}}", today), "{{SERIES}}", seriesCtx), "{{THREADS}}", threadCtx), "{{SENDERS}}", senderCtx).split("{{RECENT}}").join(recentCtx)
       .split("{{USER_LABEL}}").join(CFG.userLabel || "").split("{{USER_NAME}}").join(CFG.userName || "") + "\n" + chunk.map((c) => `- ${c.dir}`).join("\n");
 
     // 읽기 범위 제한: 작업 폴더 inbox + Read(./**) 만 허용 -> inbox 밖 파일은 읽기 거부, 나머지 도구 금지
@@ -265,29 +301,37 @@ async function summarize() {
 
 // ---------- 3) 아침 브리핑 · 마감 임박 알림 (하루 한 번씩) ----------
 async function getBrief() {
+  ensureDashboard(); // 체크 기록은 대시보드 화면의 저장소에서 읽으므로 파일이 있어야 함
   await ego("marks.mjs", "marks"); // 대시보드 체크 기록 읽기
   nodeBuild("brief");
   return readJson(P("last-brief.json"), null);
+}
+// 하루 한 번 알림: 체크 기록을 못 읽으면 다음 실행에 다시 시도하고, BRIEF_TRIES 번째에는 그대로 보낸다
+async function briefOnce(kind) {
+  const d = ymd(), b = await getBrief();
+  if (!b) { if (bumpTry(`${kind}-try-${d}`) < BRIEF_TRIES) return null; setFlag(`${kind}-${d}`); return null; }
+  if (!b.marksOk && bumpTry(`${kind}-try-${d}`) < BRIEF_TRIES) { log(`${kind === "brief" ? "아침 브리핑" : "마감 알림"}: 체크 기록을 못 읽어 다음 실행에 다시 시도`); return null; }
+  setFlag(`${kind}-${d}`);
+  return b;
 }
 async function reminders() {
   const now = new Date(), d = ymd(now);
   if (!S.days.includes(now.getDay())) return;
   if (now.getHours() >= BRIEF_HOUR && !hasFlag(`brief-${d}`)) {
-    setFlag(`brief-${d}`);
-    const b = await getBrief();
+    const b = await briefOnce("brief");
     if (b) {
       const lines = [];
       if ((b.overdue || []).length) lines.push(`마감 지남 ${b.overdue.length}건: ${b.overdue.join(", ")}`);
       if ((b.dueToday || []).length) lines.push(`오늘 마감 ${b.dueToday.length}건: ${b.dueToday.join(", ")}`);
       if (b.suspicious) lines.push(`확인할 의심 메일 ${b.suspicious}통`);
       if (!lines.length) lines.push("오늘 마감인 일은 없어요.");
+      if (!b.marksOk) lines.push("(체크 기록을 못 읽어 끝낸 일이 섞여 있을 수 있어요)");
       notify(`좋은 아침이에요 · 남은 할 일 ${b.open}개`, lines.join("\n"), DASHBOARD);
       log(`아침 브리핑: 남은 ${b.open}, 긴급 ${(b.overdue || []).length + (b.dueToday || []).length}, 체크기록 ${b.marksOk ? "반영" : "못 읽음"}`);
     }
   }
   if (now.getHours() >= REMIND_HOUR && !hasFlag(`remind-${d}`)) {
-    setFlag(`remind-${d}`);
-    const b = await getBrief();
+    const b = await briefOnce("remind");
     const list = b ? [...(b.overdue || []), ...(b.dueToday || [])] : [];
     if (list.length) { notify(`아직 처리하지 않은 오늘 마감 ${list.length}건`, list.join("\n"), DASHBOARD); log(`마감 임박 알림: ${list.length}건`); }
   }
@@ -321,23 +365,31 @@ if (argv.includes("--test-notify")) { // 설치 확인용: 알림 한 번 띄우
   notify("auto-mail 알림 시험", "이 알림이 보이면 설정이 끝난 거예요. 누르면 대시보드가 열려요.", DASHBOARD);
   console.log("notify sent"); process.exit(0);
 }
+if (argv.includes("--open")) { // 대시보드 열기 (없으면 만들고, Mac 은 ego lite 로)
+  const ok = ensureDashboard() && openTarget(DASHBOARD);
+  console.log(ok ? `opened ${DASHBOARD}` : "대시보드를 열지 못했어요 (run.log 확인)"); process.exit(ok ? 0 : 1);
+}
 if (argv.includes("--check")) { // 설치 확인용: 필요한 프로그램 경로 출력
-  console.log(JSON.stringify({ platform: process.platform, node: process.execPath, ego: egoPath(), claude: claudePath(), model: CFG.claudeModel || "(CLI 기본값)", schedule: S }, null, 1));
+  console.log(JSON.stringify({ platform: process.platform, node: process.execPath, ego: egoPath(), egoApp: egoApp(), claude: claudePath(), model: CFG.claudeModel || "(CLI 기본값)", schedule: S }, null, 1));
   process.exit(0);
 }
 const now = new Date();
 const inWindow = S.days.includes(now.getDay()) && now.getHours() >= S.startHour && now.getHours() < S.endHour;
 if (!inWindow && !argv.includes("--now")) process.exit(0); // 실행 시간대 밖 (launchd 는 매분 깨우므로 여기서 거름)
 
-// 동시 실행 방지: 잠금 파일 (프로세스가 살아 있고 15분 안이면 건너뜀)
+// 동시 실행 방지: 잠금 파일. 앞선 실행이 살아 있으면 건너뛴다.
+// 앞선 실행은 요약 묶음마다 잠금 시각을 새로 고치므로, LOCK_STALE_MIN 동안 갱신이 없을 때만 멈춘 것으로 본다.
 const lock = readJson(LOCK, null);
 if (lock) {
   let alive = false; try { process.kill(lock.pid, 0); alive = true; } catch {}
-  if (alive && Date.now() - new Date(lock.at).getTime() < 15 * 60000) process.exit(0);
+  const age = (Date.now() - new Date(lock.at).getTime()) / 60000;
+  if (alive && age < LOCK_STALE_MIN) process.exit(0);
+  if (alive) log(`앞선 실행(pid ${lock.pid})이 ${Math.floor(age)}분째 응답이 없어 새로 시작해요`);
 }
-fs.writeFileSync(LOCK, JSON.stringify({ pid: process.pid, at: new Date().toISOString() }), "utf8");
+touchLock();
 try {
   fs.mkdirSync(FLAGS, { recursive: true });
+  ensureDashboard();
   const res = argv.includes("--skip-collect") ? { ok: true } : await collect(); // --skip-collect: 시험용(대기열만 요약)
   if (res && res.ok) await summarize();
   await reminders();
