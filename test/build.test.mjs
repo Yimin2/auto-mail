@@ -126,3 +126,47 @@ test("대화: 인용으로만 확인된 메일, 제목이 달라도 threadOf 로
   assert.equal(RELATED[saved.id][0].id, other.id, "반대쪽에도 표시");
   assert.ok(ids.length > 0);
 });
+
+test("수신 확인 메일은 Claude 없이 저장하고, 자동 검사가 위험이면 요약으로 남긴다", () => {
+  const p6 = path.join(root, "p6.json");
+  fs.writeFileSync(p6, JSON.stringify([
+    { dir: "/x/inbox/20261119-1400_rc", subject: "수신 확인(읽음): 견적 요청의 건", from: "최우성", when: `${today} 14:00`, openUrl: null },
+    { dir: "/x/inbox/20261119-1401_rc2", subject: "읽음: 비밀번호 변경", from: "관리자", when: `${today} 14:01`, risk: { level: "high", reasons: ["비슷한 도메인"] } },
+    { dir: "/x/inbox/20261119-1402_n", subject: "일반 메일", from: "김", when: `${today} 14:02` },
+  ]));
+  const r = build("ingest-receipts", p6);
+  assert.deepEqual(JSON.parse(r.stdout.trim().split("\n").pop()).done, ["/x/inbox/20261119-1400_rc"]);
+  const m = read("data/mails.json").find((x) => x.dir === "/x/inbox/20261119-1400_rc");
+  assert.equal(m.oneLine, '"견적 요청의 건" 메일을 최우성 님이 읽었어요');
+  assert.equal(m.series, null);
+  assert.equal(m.importance, "low");
+});
+
+test("요약 참고 정보: 관련 없는 묶음은 회차 기록을 빼고, 최근 메일은 한 목록에 묶음 표시", () => {
+  const mails = read("data/mails.json");
+  const extra = [1, 2].map((i) => ({ id: `rep${i}`, date: today, time: `0${i}:00`, subject: `자산 만료 보고서 ${i}`, from: "Asset Bot", category: "work",
+    oneLine: `만료 ${i}건`, points: [`세부 ${i}`], tasks: [], series: { name: "자산 만료 보고서", issue: `${i}회` } }));
+  fs.writeFileSync(path.join(root, "data/mails.json"), JSON.stringify(mails.concat(extra)));
+  const pc = path.join(root, "pc.json");
+  const ctx = (chunk) => { fs.writeFileSync(pc, JSON.stringify(chunk)); return build("series-context", pc).stdout; };
+  const rel = ctx([{ dir: "/x/a", subject: "자산 만료 보고서", from: "Asset Bot" }]);
+  assert.match(rel, /세부 2/, "같은 보낸 사람이면 회차 기록을 준다");
+  const unrel = ctx([{ dir: "/x/b", subject: "점심 메뉴", from: "누군가" }]);
+  assert.match(unrel, /자산 만료 보고서 \(2회차.*회차 기록 생략/);
+  assert.ok(!unrel.includes("세부 2"));
+  const recent = build("recent-context").stdout;
+  assert.match(recent, /^- r\d+ \|.*자산 만료 보고서 2 \[묶음: 자산 만료 보고서\]/m);
+  assert.ok(!/수신 확인/.test(recent), "수신 확인 메일은 후보에서 뺀다");
+});
+
+test("최근 메일 짧은 번호(r1)는 저장할 때 실제 메일 id 로 바뀐다", () => {
+  const out = build("recent-context").stdout;
+  const [, ref, subj] = out.match(/^- (r\d+) \| [^|]+\| [^|]+\| ([^|\[]+?)(?: \[묶음[^\]]*\])? \|/m);
+  const target = read("data/mails.json").find((m) => m.subject === subj.trim());
+  const p7 = path.join(root, "p7.json");
+  fs.writeFileSync(p7, JSON.stringify([{ dir: "/x/inbox/20261119-1500_ref", subject: "제목 바꾼 답장", when: `${today} 15:00` }]));
+  fs.writeFileSync(path.join(root, "ref.txt"), JSON.stringify([{ dir: "/x/inbox/20261119-1500_ref", date: today, time: "15:00", subject: "제목 바꾼 답장",
+    category: "work", oneLine: "답장", threadOf: ref, related: [] }]));
+  assert.match(build("ingest", path.join(root, "ref.txt"), p7).stdout, /ok 1/);
+  assert.equal(read("data/mails.json").find((m) => m.subject === "제목 바꾼 답장").threadOf, target.id);
+});

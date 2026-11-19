@@ -227,6 +227,8 @@ chmod +x install-mac.sh
 | `tools/make-ds.js` | 디자인 시스템 → `ds/` CSS 변환 |
 | `config.example.json` | 개인 설정 예시 |
 
+**토큰 절약:** "수신 확인(읽음)" 메일은 Claude 없이 바로 저장해요(토큰 0). 요약할 때 주는 참고 정보는 관련 있는 반복 메일의 회차 기록만 넣고, 최근 메일 목록은 짧은 번호로 한 번만 줘요. 20쪽이 넘는 PDF 는 앞 10쪽만 읽어요
+
 **실행 중에 생기는 파일 (git 제외):** `config.json`, `inbox/`, `data/`, `dashboard.html`, `pending.json`, `state.json`, `run.log`, `flags/`, `last-*.json`, `*.err`, `*.out`
 
 ---

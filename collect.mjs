@@ -25,7 +25,7 @@ const ATTACH_MAX_BYTES = 30 * 1024 * 1024;
 
 // 본문 해석·보안 검사·첨부 글자 추출은 lib/ 에 있음 (테스트도 같은 코드를 씀)
 const { bodyText, makeSecurityCheck, companyDomainsOf } = await import(new URL("./lib/mail.mjs", import.meta.url).href);
-const { extractText, EXTRACT_EXT } = await import(new URL("./lib/extract.mjs", import.meta.url).href);
+const { extractText, EXTRACT_EXT, pdfPageCount, PDF_BIG_PAGES } = await import(new URL("./lib/extract.mjs", import.meta.url).href);
 const securityCheck = makeSecurityCheck(companyDomainsOf(CFG));
 const MAIL_FAIL_LIMIT = 3; // 같은 메일을 이만큼 연속으로 못 읽으면 건너뛰고 기록만 남김
 
@@ -105,6 +105,7 @@ try {
             if (!r.ok) item.skipped = `다운로드 실패(HTTP ${r.status})`;
             else {
               item.saved = out;
+            if (/\.pdf$/i.test(ext)) { try { item.pages = pdfPageCount(await fs.readFile(out)) || null; } catch {} } // 큰 PDF 는 앞부분만 읽게 표시
               if (EXTRACT_EXT.test(ext)) {
                 try {
                   const t = await extractText(out, await fs.readFile(out));
@@ -138,7 +139,7 @@ try {
           `- 보낸 시각: ${when} (KST)`,
           `- 받는 사람: ${cn(doc.SendTo).join(", ")}`,
           cn(doc.CopyTo).length ? `- 참조: ${cn(doc.CopyTo).join(", ")}` : null,
-          attachments.length ? `- 첨부: ${attachments.map((a) => a.name + (a.skipped ? ` [${a.skipped}]` : "")).join(", ")}` : null,
+          attachments.length ? `- 첨부: ${attachments.map((a) => a.name + (a.skipped ? ` [${a.skipped}]` : a.pages ? ` [PDF ${a.pages}쪽${a.pages > PDF_BIG_PAGES ? ` · ${PDF_BIG_PAGES}쪽 초과` : ""}]` : "")).join(", ")}` : null,
           risk ? `- 자동 보안 검사: ${risk.level === "high" ? "위험" : "주의"} — ${risk.reasons.join(" / ")}` : null,
           "", "---", "", bodyText(doc.Body),
         ].filter((x) => x !== null).join("\n");

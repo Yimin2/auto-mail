@@ -63,3 +63,11 @@ test("hwp: 실제 파일 (HWP_SAMPLE)", { skip: !process.env.HWP_SAMPLE }, async
   const t = await extractText(process.env.HWP_SAMPLE, fs.readFileSync(process.env.HWP_SAMPLE));
   assert.ok(t.length > 20, "본문 글자를 뽑아야 함");
 });
+
+test("PDF 쪽수: 쪽 트리 중간 노드의 /Count 에 속지 않음", { skip: process.platform !== "darwin" }, async () => {
+  const { pdfPageCount } = await import("../lib/extract.mjs");
+  const txt = path.join(tmp, "long.txt"); fs.writeFileSync(txt, Array.from({ length: 3000 }, (_, i) => String(i + 1)).join("\n"));
+  const pdf = execFileSync("/usr/sbin/cupsfilter", [txt], { stdio: ["ignore", "pipe", "ignore"], maxBuffer: 20 * 1024 * 1024 });
+  const n = pdfPageCount(pdf);
+  assert.ok(n > 40 && n < 60, `약 50쪽이어야 함: ${n}`);
+});

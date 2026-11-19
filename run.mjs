@@ -206,9 +206,38 @@ async function collect() {
   return res;
 }
 
+// 그룹웨어 읽음 처리 · 의심 메일(dangerSet 의 unid)은 미확인으로 되돌림
+async function markRead(list, dangerSet = new Set()) {
+  const mr = list.map((c) => dangerSet.has(c.unid) ? { unid: c.unid, url: c.openUrl, subject: c.subject, unread: true }
+    : c.openUrl ? { unid: c.unid, url: c.openUrl, subject: c.subject } : null).filter(Boolean);
+  if (mr.length) {
+    saveJson(P("markread.json"), mr);
+    await ego("markread.mjs", "markread");
+    const m = readJson(P("last-markread.json"), null);
+    if (m) {
+      const readRows = (m.results || []).filter((x) => !x.wantUnread), unreadRows = (m.results || []).filter((x) => x.wantUnread);
+      if (readRows.length) {
+        const bad = readRows.filter((x) => x.read !== true).map((x) => x.subject);
+        log(`그룹웨어 읽음 처리 ${readRows.length - bad.length}/${readRows.length}통${bad.length ? " · 안 됨: " + bad.join(", ") : ""}`);
+      }
+      if (unreadRows.length) log(`의심 메일 미확인 유지 ${unreadRows.filter((x) => x.read !== true && x.unid).length}/${unreadRows.length}통: ${unreadRows.map((x) => x.subject).join(", ")}`);
+    }
+  }
+}
+
 // ---------- 2) 요약 (새 메일이 있을 때만, 5통씩, 연속 실패 시 쉬기) ----------
 async function summarize() {
   let items = [].concat(readJson(PENDING, []));
+  if (!items.length) return;
+  // 수신 확인(읽음) 메일은 Claude 없이 바로 저장 (자동 보안 검사가 "위험"인 것은 제외하고 요약으로 보냄)
+  const rc = nodeBuild("ingest-receipts", PENDING);
+  let rcRes = null; try { rcRes = JSON.parse((rc.stdout || "").trim().split("\n").pop()); } catch {}
+  if (rcRes && rcRes.done && rcRes.done.length) {
+    const doneSet = new Set(rcRes.done), handled = items.filter((i) => doneSet.has(i.dir));
+    items = items.filter((i) => !doneSet.has(i.dir)); saveJson(PENDING, items);
+    log(`수신 확인 메일 ${handled.length}통은 요약 없이 저장`);
+    await markRead(handled);
+  }
   if (!items.length) return;
   let fail = readJson(FAIL_FILE, { count: 0, pausedUntil: null });
   if (fail.pausedUntil && Date.now() < new Date(fail.pausedUntil).getTime()) return;
@@ -226,7 +255,7 @@ async function summarize() {
     touchLock();
     const chunk = items.slice(0, CHUNK_SIZE);
     saveJson(chunkFile, chunk);
-    const seriesCtx = (nodeBuild("series-context").stdout || "").trim() || "(아직 없음)";
+    const seriesCtx = (nodeBuild("series-context", chunkFile).stdout || "").trim() || "(아직 없음)";
     const threadCtx = (nodeBuild("thread-context", chunkFile).stdout || "").trim() || "(없음)";
     const senderCtx = (nodeBuild("sender-context", chunkFile).stdout || "").trim() || "(없음)";
     const recentCtx = (nodeBuild("recent-context").stdout || "").trim() || "(없음)";
@@ -271,22 +300,7 @@ async function summarize() {
     else workAll.push(...chunk.map((c) => c.subject));
     const dangerSet = new Set((sum && sum.dangerUnids) || []);
 
-    // 그룹웨어 읽음 처리 · 의심 메일은 미확인으로 되돌림
-    const mr = chunk.map((c) => dangerSet.has(c.unid) ? { unid: c.unid, url: c.openUrl, subject: c.subject, unread: true }
-      : c.openUrl ? { unid: c.unid, url: c.openUrl, subject: c.subject } : null).filter(Boolean);
-    if (mr.length) {
-      saveJson(P("markread.json"), mr);
-      await ego("markread.mjs", "markread");
-      const m = readJson(P("last-markread.json"), null);
-      if (m) {
-        const readRows = (m.results || []).filter((x) => !x.wantUnread), unreadRows = (m.results || []).filter((x) => x.wantUnread);
-        if (readRows.length) {
-          const bad = readRows.filter((x) => x.read !== true).map((x) => x.subject);
-          log(`그룹웨어 읽음 처리 ${readRows.length - bad.length}/${readRows.length}통${bad.length ? " · 안 됨: " + bad.join(", ") : ""}`);
-        }
-        if (unreadRows.length) log(`의심 메일 미확인 유지 ${unreadRows.filter((x) => x.read !== true && x.unid).length}/${unreadRows.length}통: ${unreadRows.map((x) => x.subject).join(", ")}`);
-      }
-    }
+    await markRead(chunk, dangerSet); // 그룹웨어 읽음 처리 · 의심 메일은 미확인으로 되돌림
   }
   rm(chunkFile);
   if (!doneCount) return;

@@ -22,6 +22,7 @@ const idOf = (dir) => path.basename(String(dir || "")).replace(/[^\w가-힣-]/g,
 // 아직 할 일이 남아 있을 수 있는 메일(할 일이 있는 메일)은 대시보드에 남긴다.
 // 실제 체크 여부는 브라우저에 있으므로, 할 일이 있는 메일은 180일까지 대시보드에 둔다.
 const ARCHIVE = `${ROOT}/data/archive`;
+const RECENT_MAP = `${ROOT}/recent-map.json`; // 요약 지침의 "최근 메일" 짧은 번호 -> 메일 id
 const KEEP_TASK_DAYS = 180;
 function archiveOld(list) {
   const now = Date.now(), keep = [], move = {};
@@ -62,6 +63,12 @@ function ingest(rawFile, pendingFile) {
   const riskOf = new Map(pending.map((p) => [idOf(p.dir), p.risk || null])); // 규칙 기반 보안 검사 결과
   const addrOfId = new Map(pending.map((p) => [idOf(p.dir), p.fromAddr || null])); // 보낸 주소(판정 기록 찾기용)
   const knownIds = new Set([...byId.keys(), ...allMails().map((m) => m.id)]); // threadOf·related 가 가리킬 수 있는 메일
+  const rmap = readJson(RECENT_MAP, {}), ref = (x) => (x == null ? x : rmap[String(x)] || String(x)); // r번호 -> 메일 id
+  if (parsed) for (const m of parsed) {
+    if (m.threadOf) m.threadOf = ref(m.threadOf);
+    if (Array.isArray(m.related)) for (const r of m.related) if (r) r.id = ref(r.id);
+    if (m.series && Array.isArray(m.series.backfill)) for (const b of m.series.backfill) if (b) b.id = ref(b.id);
+  }
   const kindOf = (t, role) => t.kind === "mine" || t.kind === "watch" ? t.kind : (role && role !== "수신" ? "watch" : "mine");
   if (parsed) {
     for (const m of parsed) {
@@ -179,10 +186,16 @@ function threadContext(pendingFile) {
 
 // 요약 지침에 넣을 "최근 메일" (같은 대화 잇기 threadOf · 관련 대화 related 의 후보)
 function recentContext() {
+  // 같은 대화 잇기(threadOf)·관련 대화(related)·반복 메일 소급(backfill) 후보를 한 목록으로
   const cut = new Date(Date.now() - 30 * 864e5).toISOString().slice(0, 10);
-  const list = readJson(DATA, []).filter((m) => m.date >= cut && m.category !== "promo" && !isReceipt(m.subject) && !(m.series && m.series.name))
+  const list = readJson(DATA, []).filter((m) => m.date >= cut && m.category !== "promo" && !isReceipt(m.subject))
     .sort((a, b) => (b.date + b.time).localeCompare(a.date + a.time)).slice(0, 60);
-  console.log(list.length ? list.map((m) => `- ${m.id} | ${m.date} ${m.time} | ${nameOf(m.from)} | ${m.subject} | ${m.oneLine}`).join("\n") : "(없음)");
+  // 메일 id 는 제목을 그대로 담아 길어서, 짧은 번호(r1, r2 …)로 주고 ingest 때 recent-map.json 으로 되돌린다
+  fs.writeFileSync(RECENT_MAP, JSON.stringify(Object.fromEntries(list.map((m, i) => [`r${i + 1}`, m.id]))), "utf8");
+  console.log(list.length ? list.map((m, i) => {
+    const tag = m.series && m.series.name ? ` [묶음: ${m.series.name}]` : "";
+    return `- r${i + 1} | ${m.date} ${m.time} | ${nameOf(m.from)} | ${m.subject}${tag} | ${m.oneLine}`;
+  }).join("\n") : "(없음)");
 }
 
 // 요약 지침에 넣을 "보낸 사람 판정 기록": 같은 보낸 사람의 예전 경고 메일을 사용자가 정상/위험으로 판정한 기록
@@ -229,17 +242,55 @@ function seriesGroups() {
   return g;
 }
 // 요약 지침에 넣을 "알고 있는 묶음" (묶음별 직전 회차, 최근 것 20개)
-function seriesContext() {
-  const g = [...seriesGroups().entries()].sort((a, b) => (b[1][0].date + b[1][0].time).localeCompare(a[1][0].date + a[1][0].time)).slice(0, 20);
-  // 묶음마다 최근 5회차를 준다 (Redmine 일감 번호처럼 같은 대상의 이전 회차를 찾아 비교하도록)
-  console.log(g.length ? g.map(([name, arr]) => `- 묶음: ${name}\n` + arr.slice(0, 5).map((m) =>
-    `  · ${(m.series && m.series.issue) || "-"} (${m.date} ${m.time}) | ${m.oneLine}\n    핵심: ${(m.points || []).slice(0, 5).join(" / ")}`).join("\n")).join("\n") : "(아직 없음)");
-  // 새 묶음을 만들 때 소급해서 넣을 수 있도록, 최근 30일 동안 묶음 없는 메일 목록도 준다
-  const cut = new Date(Date.now() - 30 * 864e5).toISOString().slice(0, 10);
-  const loose = readJson(DATA, []).filter((m) => !(m.series && m.series.name) && m.date >= cut && m.category !== "promo" && !isReceipt(m.subject))
-    .sort((a, b) => (b.date + b.time).localeCompare(a.date + a.time)).slice(0, 40);
-  console.log("\n최근 묶음 없는 메일(id | 날짜 | 보낸 사람 | 제목 | 요약):");
-  console.log(loose.length ? loose.map((m) => `- ${m.id} | ${m.date} ${m.time} | ${String(m.from || "").split("·")[0].trim()} | ${m.subject} | ${m.oneLine} / ${(m.points || []).slice(0, 3).join(" / ")}`).join("\n") : "(없음)");
+// 요약 지침에 넣을 "알고 있는 묶음": 이름 목록은 전부, 회차 기록(최근 5회차)은 이번 메일과 관련 있어 보이는 묶음만
+// 관련: 보낸 사람이 같거나, 숫자·날짜를 뺀 제목 낱말이 절반 이상 겹치거나, 일감 번호(#1234)가 같음
+const subjWords = (s) => new Set(String(s || "").toLowerCase().replace(/^\s*((re|fw|fwd|회신|답장|전달)\s*:\s*)+/i, "")
+  .replace(/[0-9]+/g, " ").split(/[^0-9a-z가-힣]+/).filter((w) => w.length >= 2));
+const ticketNos = (s) => new Set(String(s || "").match(/#\d{3,}/g) || []);
+function seriesRelevant(arr, chunk) {
+  return chunk.some((c) => {
+    const cn = nameOf(c.from), cw = subjWords(c.subject), ct = ticketNos(c.subject);
+    return arr.slice(0, 10).some((m) => {
+      if (cn && nameOf(m.from) === cn) return true;
+      if ([...ticketNos(m.subject)].some((t) => ct.has(t))) return true;
+      const mw = subjWords(m.subject); if (!cw.size || !mw.size) return false;
+      const hit = [...cw].filter((w) => mw.has(w)).length;
+      return hit / Math.min(cw.size, mw.size) >= 0.5;
+    });
+  });
+}
+function seriesContext(chunkFile) {
+  const chunk = chunkFile ? [].concat(readJson(chunkFile, [])) : [];
+  const g = [...seriesGroups().entries()].sort((a, b) => (b[1][0].date + b[1][0].time).localeCompare(a[1][0].date + a[1][0].time)).slice(0, 30);
+  if (!g.length) { console.log("(아직 없음)"); return; }
+  const out = [];
+  for (const [name, arr] of g) {
+    const head = `- 묶음: ${name} (${arr.length}회차, 최근 ${arr[0].date} · ${nameOf(arr[0].from)} · ${arr[0].subject})`;
+    if (!chunkFile || seriesRelevant(arr, chunk)) {
+      out.push(head + "\n" + arr.slice(0, 5).map((m) => `  · ${(m.series && m.series.issue) || "-"} (${m.date} ${m.time}) | ${m.oneLine}\n    핵심: ${(m.points || []).slice(0, 5).join(" / ")}`).join("\n"));
+    } else out.push(head + " — 회차 기록 생략(이번 메일과 관련 없어 보임)");
+  }
+  console.log(out.join("\n"));
+}
+
+// 수신 확인(읽음) 메일은 Claude 없이 저장 (자동 보안 검사가 "위험"이면 요약으로 보냄)
+// 출력 마지막 줄: {"done": [처리한 dir...]}
+function ingestReceipts(pendingFile) {
+  const pending = [].concat(readJson(pendingFile, []));
+  const list = pending.filter((p) => isReceipt(p.subject) && !(p.risk && p.risk.level === "high"));
+  if (!list.length) { console.log(JSON.stringify({ done: [] })); return; }
+  const mails = readJson(DATA, []), byId = new Map(mails.map((m) => [m.id, m])), now = new Date().toISOString();
+  for (const p of list) {
+    const id = idOf(p.dir), orig = String(p.subject).replace(/^\s*(수신\s*확인\s*(\(읽음\))?|읽음|read)\s*:\s*/i, "").trim();
+    byId.set(id, { id, date: String(p.when || "").slice(0, 10), time: String(p.when || "").slice(11, 16), subject: p.subject, from: p.from || "",
+      fromAddr: p.fromAddr || null, url: p.openUrl || null, dir: p.dir || null, category: "work", importance: "low",
+      oneLine: `"${orig}" 메일을 ${nameOf(p.from) || "받는 사람"} 님이 읽었어요`.slice(0, 120), points: [], attachments: [], role: p.role || null,
+      risk: p.risk || null, tasks: [], warning: null, receipt: true, addedAt: now, threadNew: [], quoted: [], threadOf: null, related: [], series: null });
+  }
+  fs.mkdirSync(path.dirname(DATA), { recursive: true });
+  fs.writeFileSync(DATA, JSON.stringify(archiveOld([...byId.values()]), null, 1), "utf8");
+  render();
+  console.log(JSON.stringify({ done: list.map((p) => p.dir) }));
 }
 
 // 브리핑·마감 알림용 집계 (data/marks.json 의 체크 기록 반영) -> last-brief.json
@@ -837,7 +888,8 @@ setInterval(() => {
 const [, , cmd, a1, a2] = process.argv;
 if (cmd === "ingest") { ingest(a1, a2); render(); }
 else if (cmd === "brief") brief();
-else if (cmd === "series-context") seriesContext();
+else if (cmd === "series-context") seriesContext(a1);
+else if (cmd === "ingest-receipts") ingestReceipts(a1);
 else if (cmd === "thread-context") threadContext(a1);
 else if (cmd === "sender-context") senderContext(a1);
 else if (cmd === "recent-context") recentContext();
