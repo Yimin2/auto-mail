@@ -327,7 +327,6 @@ body{font-size:16px;line-height:26px}
 .top h1{margin:0;font-size:28px;line-height:36px;font-weight:700;letter-spacing:-0.01em;text-wrap:balance}
 .top .hint{margin:0}
 .stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:var(--space-4);margin-bottom:var(--space-6)}
-@media (min-width:768px) and (max-width:1279px){.stats{grid-template-columns:repeat(2,minmax(0,1fr))}}
 .stats .card{padding:var(--space-5) var(--space-6);gap:var(--space-1)}
 .stats .value{font-size:28px;line-height:36px;font-weight:800;font-variant-numeric:tabular-nums}
 .stats .label{display:flex;align-items:center;gap:var(--space-2);font-size:14px;line-height:22px;font-weight:500;color:var(--text-muted)}
@@ -441,10 +440,29 @@ body{font-size:16px;line-height:26px}
 .empty .hint{max-width:360px}
 .series details.flash>summary{box-shadow:inset 0 0 0 2px var(--primary)}
 .mails details.flash>summary{box-shadow:inset 0 0 0 2px var(--primary)}
+/* 1280px 미만(태블릿 세로·모바일): 탭으로 한 칸씩 보여요. 요약 숫자는 한 줄로 작게 */
+.ptabs{display:none}
+.tcount{font-variant-numeric:tabular-nums;color:var(--text-muted);font-weight:500}
+.tab.on .tcount{color:inherit}
+.tcount .new{display:inline-flex;align-items:center;gap:var(--space-1);color:var(--primary-text);font-weight:700}
+.tcount .new::before{content:"";width:8px;height:8px;border-radius:var(--radius-full);background:var(--primary)}
+@media (max-width:1279px){
+  .ptabs{display:flex;position:sticky;top:0;z-index:var(--z-sticky);background:var(--bg);margin:0 0 var(--space-2)}
+  .ptabs .tab{flex:1;padding:0 var(--space-2);white-space:nowrap}
+  #main[data-tab="tasks"] .pane:not([data-pane="tasks"]),
+  #main[data-tab="mails"] .pane:not([data-pane="mails"]),
+  #main[data-tab="series"] .pane:not([data-pane="series"]){display:none}
+  #main .pane>.sec:first-child{margin-top:var(--space-4)}
+  .stats,#main>.stats{grid-template-columns:repeat(4,minmax(0,1fr));gap:var(--space-3);margin-bottom:var(--space-4)}
+  .stats .card{padding:var(--space-3) var(--space-4);gap:0}
+  .stats .value{font-size:22px;line-height:30px}
+  .stats .label{font-size:13px;line-height:20px}
+  .alert-row{margin-bottom:var(--space-4)}
+}
 @media (max-width:767px){
   .wrap{padding:var(--space-6) var(--space-4) var(--space-12)}
   .top h1{font-size:24px;line-height:34px}
-  .stats{grid-template-columns:minmax(0,1fr);gap:var(--space-3)}
+  .stats,#main>.stats{grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--space-2)}
   .task{padding:var(--space-3) var(--space-4);flex-wrap:wrap;gap:0 var(--space-3)}
   .task>.badge{margin-left:calc(22px + var(--space-3))}
   .mails summary{padding:var(--space-4)}
@@ -518,21 +536,30 @@ function render() {
   <div id="main">
   <section class="stats" id="stats" aria-label="요약"></section>
   <div class="alert-row" id="alert"></div>
+  <nav class="tabs ptabs" role="tablist" aria-label="보기 전환">
+    <button type="button" class="tab" role="tab" data-tab="tasks" aria-controls="paneTasks">처리할 일 <span class="tcount" id="tcTasks"></span></button>
+    <button type="button" class="tab" role="tab" data-tab="mails" aria-controls="paneMails">받은 메일 <span class="tcount" id="tcMails"></span></button>
+    <button type="button" class="tab" role="tab" data-tab="series" aria-controls="seriesSec">반복 메일 <span class="tcount" id="tcSeries"></span></button>
+  </nav>
 
   <div class="col">
+  <div class="pane" data-pane="tasks" id="paneTasks">
   <div class="sec"><h2>처리할 일</h2><span class="hint" id="taskHint"></span></div>
   <div class="card list" id="open"></div>
   <div class="acc done-acc" id="watchWrap"><details><summary><span><span id="watchSum"></span> <span class="hint" style="font-weight:500">· 숫자·알림에는 빠져요</span></span><span aria-hidden="true">⌄</span></summary><div class="body" id="watch"></div></details></div>
   <div class="acc done-acc" id="doneWrap"><details><summary><span><span id="doneSum"></span> <span class="hint" style="font-weight:500">· 체크 후 7일 동안 보여요</span></span><span aria-hidden="true">⌄</span></summary><div class="body" id="done"></div></details></div>
+  </div>
 
-  <div id="seriesSec"><div class="sec"><h2>반복 메일</h2><span class="hint">같은 종류끼리 묶어 지난번과 달라진 점을 보여 드려요</span></div>
+  <div id="seriesSec" class="pane" data-pane="series"><div class="sec"><h2>반복 메일</h2><span class="hint">같은 종류끼리 묶어 지난번과 달라진 점을 보여 드려요</span></div>
   <div class="acc series" id="series"></div></div>
   </div>
 
   <div class="col">
+  <div class="pane" data-pane="mails" id="paneMails">
   <div class="sec"><h2>받은 메일</h2><span class="hint">눌러서 자세히 보기</span></div>
   <div id="mails"></div>
   <div class="acc promo-acc" id="promo"></div>
+  </div>
   </div>
   </div>
 </div>
@@ -799,7 +826,7 @@ function renderSearch(){
 document.addEventListener("change", e => {
   const id = e.target.dataset && e.target.dataset.id; if(!id) return;
   if(e.target.checked) doneMap[id] = new Date().toISOString(); else delete doneMap[id];
-  store.set("gwmail.done", doneMap); render();
+  store.set("gwmail.done", doneMap); render(); renderTabs();
 });
 let qTimer = null; // SearchInput: 입력 후 300ms 쉬었다가 찾고, 글자가 있을 때만 지우기 버튼
 document.getElementById("q").addEventListener("input", e => {
@@ -832,6 +859,7 @@ document.addEventListener("click", e => {
   if(sb){ // 반복 메일 칸의 해당 묶음을 열고 그 위치로
     e.preventDefault();
     const name = sb.dataset.series, idx = SERIES.findIndex(x => x.name === name);
+    if(!wide.matches) setTab("series");
     if(idx >= SHOW.series){ SHOW.series = idx + 1; renderSeries(); }
     const d = [...document.querySelectorAll("#series > details")].find(x => x.dataset.name === name);
     if(d){ d.open = true; d.scrollIntoView({behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block:"start"}); d.classList.add("flash"); setTimeout(() => d.classList.remove("flash"), 1600); }
@@ -870,10 +898,48 @@ document.addEventListener("click", e => {
     if(m){ SHOW.mailDays = Math.max(SHOW.mailDays, 1 - dayDiff(m.date)); renderMails(); d = document.getElementById(target); }
   }
   if(!d) return;
+  if(!wide.matches && d.closest(".pane")) setTab(d.closest(".pane").dataset.pane);
   d.open = true; d.scrollIntoView({behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block:"center"});
   d.classList.add("flash"); setTimeout(() => d.classList.remove("flash"), 1600);
 });
+// 탭(1280px 미만): 마지막에 본 탭을 기억. 받은 메일 탭을 열면 그때까지 온 메일을 본 것으로 쳐요
+const wide = matchMedia("(min-width:1280px)");
+const mailKey = m => m.date + " " + m.time;
+let seenAt = store.get("gwmail.seenAt");
+function newMails(){ return seenAt ? listMails().filter(m => mailKey(m) > seenAt).length : 0; }
+function markSeen(){
+  const top = listMails()[0]; if(!top) return;
+  if(!seenAt || mailKey(top) > seenAt){ seenAt = mailKey(top); store.set("gwmail.seenAt", seenAt); }
+}
+function renderTabs(){
+  const main = document.getElementById("main"), cur = main.dataset.tab;
+  if(cur === "mails" || wide.matches) markSeen();
+  const open = tasks.filter(t => !doneMap[t.id] && t.kind !== "watch").length, n = newMails();
+  document.getElementById("tcTasks").textContent = open;
+  document.getElementById("tcMails").innerHTML = n ? '<span class="new">새 '+n+'</span>' : "";
+  document.getElementById("tcSeries").textContent = SERIES.length || "";
+  document.querySelector('.ptabs [data-tab="series"]').style.display = SERIES.length ? "" : "none";
+  for(const b of document.querySelectorAll(".ptabs .tab")){ const on = b.dataset.tab === cur; b.classList.toggle("on", on); b.setAttribute("aria-selected", on); b.tabIndex = on ? 0 : -1; }
+}
+function setTab(t, keep){
+  if(t === "series" && !SERIES.length) t = "tasks";
+  document.getElementById("main").dataset.tab = t;
+  if(!keep) store.set("gwmail.tab", t);
+  renderTabs();
+}
+document.querySelector(".ptabs").addEventListener("click", e => {
+  const b = e.target.closest("[data-tab]"); if(!b) return;
+  setTab(b.dataset.tab); window.scrollTo({ top: Math.min(window.scrollY, document.querySelector(".ptabs").offsetTop), behavior: "auto" });
+});
+document.querySelector(".ptabs").addEventListener("keydown", e => { // 좌우 화살표로 탭 이동
+  if(e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+  const bs = [...document.querySelectorAll(".ptabs .tab")].filter(b => b.style.display !== "none");
+  const i = bs.indexOf(document.activeElement); if(i < 0) return;
+  const nb = bs[(i + (e.key === "ArrowRight" ? 1 : bs.length - 1)) % bs.length]; nb.focus(); nb.click();
+});
+wide.addEventListener("change", renderTabs);
 render(); renderSeries(); renderMails();
+setTab(store.get("gwmail.tab") || "tasks", true);
 // 열어 둔 대시보드는 5분마다 새로 읽어요. 검색 중이거나, 펼쳐 둔 메일·묶음이 있거나, 입력 중이면 다음 번으로 미뤄요.
 setInterval(() => {
   const busy = document.getElementById("q").value.trim() ||
