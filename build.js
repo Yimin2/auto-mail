@@ -444,11 +444,15 @@ body{font-size:16px;line-height:26px}
 .ptabs{display:none}
 .tcount{font-variant-numeric:tabular-nums;color:var(--text-muted);font-weight:500}
 .tab.on .tcount{color:inherit}
-.tcount .new{display:inline-flex;align-items:center;gap:var(--space-1);color:var(--primary-text);font-weight:700}
+.tcount:empty{display:none}
+.tcount .new{display:inline-flex;align-items:center;gap:var(--space-1);color:var(--primary-text);font-weight:700;line-height:1}
 .tcount .new::before{content:"";width:8px;height:8px;border-radius:var(--radius-full);background:var(--primary)}
 @media (max-width:1279px){
   .ptabs{display:flex;position:sticky;top:0;z-index:var(--z-sticky);background:var(--bg);margin:0 0 var(--space-2)}
-  .ptabs .tab{flex:1;padding:0 var(--space-2);white-space:nowrap}
+  .ptabs .tab{flex:1 1 0;min-width:0;display:inline-flex;align-items:center;justify-content:center;gap:var(--space-1);padding:0 var(--space-2);white-space:nowrap;line-height:1}
+  .ptabs .tcount{display:inline-flex;align-items:center}
+  #main .sec{flex-wrap:wrap;row-gap:0}
+  #main .sec h2{white-space:nowrap}
   #main[data-tab="tasks"] .pane:not([data-pane="tasks"]),
   #main[data-tab="mails"] .pane:not([data-pane="mails"]),
   #main[data-tab="series"] .pane:not([data-pane="series"]){display:none}
@@ -461,6 +465,8 @@ body{font-size:16px;line-height:26px}
 }
 @media (max-width:767px){
   .wrap{padding:var(--space-6) var(--space-4) var(--space-12)}
+  .ptabs{gap:0}
+  .ptabs .tab{padding:0 var(--space-1);font-size:15px}
   .top h1{font-size:24px;line-height:34px}
   .stats,#main>.stats{grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--space-2)}
   .task{padding:var(--space-3) var(--space-4);flex-wrap:wrap;gap:0 var(--space-3)}
@@ -537,9 +543,9 @@ function render() {
   <section class="stats" id="stats" aria-label="요약"></section>
   <div class="alert-row" id="alert"></div>
   <nav class="tabs ptabs" role="tablist" aria-label="보기 전환">
-    <button type="button" class="tab" role="tab" data-tab="tasks" aria-controls="paneTasks">처리할 일 <span class="tcount" id="tcTasks"></span></button>
-    <button type="button" class="tab" role="tab" data-tab="mails" aria-controls="paneMails">받은 메일 <span class="tcount" id="tcMails"></span></button>
-    <button type="button" class="tab" role="tab" data-tab="series" aria-controls="seriesSec">반복 메일 <span class="tcount" id="tcSeries"></span></button>
+    <button type="button" class="tab" role="tab" data-tab="tasks" aria-controls="paneTasks">처리할 일<span class="tcount" id="tcTasks"></span></button>
+    <button type="button" class="tab" role="tab" data-tab="mails" aria-controls="paneMails">받은 메일<span class="tcount" id="tcMails"></span></button>
+    <button type="button" class="tab" role="tab" data-tab="series" aria-controls="seriesSec">반복 메일<span class="tcount" id="tcSeries"></span></button>
   </nav>
 
   <div class="col">
@@ -916,7 +922,7 @@ function renderTabs(){
   if(cur === "mails" || wide.matches) markSeen();
   const open = tasks.filter(t => !doneMap[t.id] && t.kind !== "watch").length, n = newMails();
   document.getElementById("tcTasks").textContent = open;
-  document.getElementById("tcMails").innerHTML = n ? '<span class="new">새 '+n+'</span>' : "";
+  document.getElementById("tcMails").innerHTML = n ? '<span class="new" title="새로 온 메일 '+n+'통">'+n+'</span>' : "";
   document.getElementById("tcSeries").textContent = SERIES.length || "";
   document.querySelector('.ptabs [data-tab="series"]').style.display = SERIES.length ? "" : "none";
   for(const b of document.querySelectorAll(".ptabs .tab")){ const on = b.dataset.tab === cur; b.classList.toggle("on", on); b.setAttribute("aria-selected", on); b.tabIndex = on ? 0 : -1; }
