@@ -47,6 +47,25 @@ const task = await taskSpace("gw-mail-collector");
 let page = (await task.pages())[0];
 if (!page) page = await task.newPage();
 
+// ---------- 세션 진단 (로그인 풀림 원인 찾기용, 쿠키 값은 남기지 않고 이름·시각만) ----------
+// LtpaToken(v1) = base64(헤더 4바이트 + 발급 8hex + 만료 8hex + 사용자 + 서명)
+async function sessionInfo() {
+  try {
+    const r = await page.cdp("Network.getCookies", { urls: [GW + "/"] });
+    const names = (r.cookies || []).map((c) => c.name);
+    const info = { cookies: names, ltpaCreated: null, ltpaExpires: null };
+    const lt = (r.cookies || []).find((c) => /^LtpaToken$/i.test(c.name));
+    if (lt) {
+      const h = Buffer.from(decodeURIComponent(lt.value), "base64").subarray(4, 20).toString("latin1");
+      if (/^[0-9a-f]{16}$/i.test(h)) { info.ltpaCreated = new Date(parseInt(h.slice(0, 8), 16) * 1000).toISOString(); info.ltpaExpires = new Date(parseInt(h.slice(8, 16), 16) * 1000).toISOString(); }
+    }
+    return info;
+  } catch (e) { return { error: String(e?.message || e).slice(0, 120) }; }
+}
+const where = async () => { try { const u = new URL(await page.url()); return u.protocol === "chrome-error:" ? "오류 화면" : u.host + u.pathname + (/login/i.test(u.search) ? "?Login" : ""); } catch { return "?"; } };
+const bodyKind = (r) => { const b = String((r && r.body) || ""); return !b.trim() ? "빈 응답" : /names\.nsf|login|password|암호|로그인/i.test(b) ? "로그인 화면" : /^\s*</.test(b) ? "HTML" : "알 수 없는 응답"; };
+const diag = { reloaded: false, revived: false };
+
 try {
   // 세션 유지: 그룹웨어 탭이 아니거나 마지막 새로고침 후 15분이 지났으면 첫 화면을 다시 연다
   const KEEPALIVE_MS = 15 * 60e3;
@@ -54,13 +73,17 @@ try {
   if (!String(await page.url()).startsWith(GW) || Date.now() - lastReload > KEEPALIVE_MS) {
     await page.goto(GW + "/", { timeout: 60000 });
     state.lastReloadAt = new Date().toISOString();
+    diag.reloaded = true; diag.afterReload = await where();
   }
   let list = await page.fetch(`${MAILDB}/api/data/collections/name/($inbox_all_portal)?ps=40&page=0`, { timeout: 30000 });
   let entries; try { entries = JSON.parse(list.body); } catch { entries = null; }
   if (!Array.isArray(entries)) { // 세션 갱신 한 번 시도
+    diag.firstStatus = list.status; diag.firstBody = bodyKind(list);
     await page.goto(GW + "/", { timeout: 60000 });
+    diag.afterRetryGoto = await where();
     list = await page.fetch(`${MAILDB}/api/data/collections/name/($inbox_all_portal)?ps=40&page=0`, { timeout: 30000 });
     try { entries = JSON.parse(list.body); } catch { entries = null; }
+    if (Array.isArray(entries)) diag.revived = true; // 첫 화면을 다시 열자 살아남
   }
   // 놓침 방지: 첫 페이지가 모두 새 메일이면 이미 처리한 메일이 나올 때까지 다음 페이지도 가져온다(최대 10페이지)
   if (Array.isArray(entries) && !firstRun) {
@@ -77,7 +100,9 @@ try {
   if (!Array.isArray(entries)) {
     result.ok = false; result.loginRequired = true;
     result.message = `메일 목록을 못 읽었습니다(HTTP ${list.status}). 그룹웨어 로그인이 풀렸을 수 있습니다.`;
+    Object.assign(diag, { status: list.status, body: bodyKind(list), lastOkAt: state.lastOkAt || null, lastReloadAt: state.lastReloadAt || null, prevSession: state.session || null });
   } else {
+    state.lastOkAt = new Date().toISOString();
     const cutoff = Date.now() - FIRST_RUN_LOOKBACK_HOURS * 3600e3;
     const targets = entries.filter((e) => !seen.has(e["@unid"]) && (!firstRun || new Date(e._created).getTime() >= cutoff));
     for (const e of targets.reverse()) {
@@ -163,8 +188,9 @@ try {
       } catch {}
     }
     if (firstRun) for (const e of entries) seen.add(e["@unid"]);
+    result.session = await sessionInfo(); // 성공 때의 토큰 발급·만료 시각 (갱신 주기를 보려고)
     await fs.mkdir(ROOT, { recursive: true });
-    state = { seen: [...seen].slice(-2000), fails, initializedAt: state.initializedAt || new Date().toISOString(), lastRunAt: new Date().toISOString(), lastReloadAt: state.lastReloadAt };
+    state = { seen: [...seen].slice(-2000), fails, lastOkAt: state.lastOkAt, session: result.session || state.session || null, initializedAt: state.initializedAt || new Date().toISOString(), lastRunAt: new Date().toISOString(), lastReloadAt: state.lastReloadAt };
     await fs.writeFile(STATE, JSON.stringify(state, null, 1), "utf8");
     if (result.newMails.length) {
       const pending = await readJson(PENDING, []);
@@ -175,5 +201,7 @@ try {
 } catch (err) {
   result.ok = false; result.message = String(err?.message || err);
 }
+if (result.loginRequired || diag.revived) { diag.session = await sessionInfo(); diag.page = await where(); }
+result.diag = diag;
 await fs.writeFile(`${ROOT}/last-result.json`, JSON.stringify(result), "utf8");
 console.log("RESULT_JSON=" + JSON.stringify(result));

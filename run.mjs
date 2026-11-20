@@ -161,6 +161,43 @@ function clearCollectFail() {
   log("수집 복구");
 }
 
+// ---------- 세션 진단: 로그인이 풀리는 원인(일정 시간·잠자기·네트워크 변경·새로고침 방식)을 run.log 에 남김 ----------
+const SDIAG_FILE = P("session-diag.json");
+const hm = (iso) => { if (!iso) return "?"; const d = new Date(iso); const day = d.toDateString() === new Date().toDateString() ? "" : `${d.getMonth() + 1}/${d.getDate()} `; return `${day}${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+const ago = (iso) => (iso ? `${Math.round((Date.now() - new Date(iso).getTime()) / 60000)}분 전` : "기록 없음");
+const localIps = () => Object.values(os.networkInterfaces()).flat().filter((i) => i && i.family === "IPv4" && !i.internal).map((i) => i.address).sort().join(",");
+function trackRun() { // 실행 공백(잠자기·꺼짐)과 네트워크 주소 변경을 기록
+  const d = readJson(SDIAG_FILE, {}), now = new Date(), ip = localIps();
+  if (d.lastRunAt) {
+    const gap = (now - new Date(d.lastRunAt)) / 60000;
+    if (gap > 5 && gap < 6 * 60 && new Date(d.lastRunAt).toDateString() === now.toDateString()) { d.gapAt = now.toISOString(); d.gapMin = Math.round(gap); log(`실행 공백 ${Math.round(gap)}분 (잠자기·꺼짐 추정)`); }
+  }
+  if (d.ip !== undefined && d.ip !== ip) { d.ipChangedAt = now.toISOString(); log(`네트워크 바뀜${ip ? "" : " (연결 없음)"}`); }
+  d.ip = ip; d.lastRunAt = now.toISOString();
+  saveJson(SDIAG_FILE, d);
+}
+const isNetError = (m) => /ERR_(INTERNET_DISCONNECTED|NAME_NOT_RESOLVED|NETWORK_CHANGED|CONNECTION|ADDRESS_UNREACHABLE|TIMED_OUT)|chrome-error|timed out/i.test(String(m || ""));
+function noteNetError(msg) { const d = readJson(SDIAG_FILE, {}); d.netErrorAt = new Date().toISOString(); d.netError = String(msg).slice(0, 80); saveJson(SDIAG_FILE, d); }
+const tokenText = (s) => !s ? "쿠키 정보 없음" : s.error ? `쿠키 확인 실패(${s.error})` :
+  `쿠키 ${s.cookies && s.cookies.length ? s.cookies.join("·") : "없음"}` + (s.ltpaCreated ? ` · 토큰 발급 ${hm(s.ltpaCreated)} 만료 ${hm(s.ltpaExpires)}` : " · 로그인 토큰 없음");
+function logLoginLost(res) {
+  const g = res.diag || {}, d = readJson(SDIAG_FILE, {});
+  log(`로그인 풀림 진단: 마지막 성공 ${hm(g.lastOkAt)}(${ago(g.lastOkAt)}) · 마지막 새로고침 ${hm(g.lastReloadAt)}(${ago(g.lastReloadAt)})` +
+    ` · 응답 HTTP ${g.status ?? "?"} ${g.body || ""} · 다시 연 화면 ${g.afterRetryGoto || "?"}`);
+  log(`  지금 ${tokenText(g.session)} | 직전 성공 때 ${tokenText(g.prevSession)}`);
+  log(`  직전 네트워크 오류 ${d.netErrorAt ? `${hm(d.netErrorAt)}(${ago(d.netErrorAt)}) ${d.netError}` : "없음"} · 네트워크 바뀜 ${d.ipChangedAt ? `${hm(d.ipChangedAt)}(${ago(d.ipChangedAt)})` : "기록 없음"}` +
+    ` · 실행 공백 ${d.gapAt ? `${d.gapMin}분, ${hm(d.gapAt)}(${ago(d.gapAt)})` : "기록 없음"}`);
+}
+function trackSession(res) { // 성공 때: 토큰이 언제 새로 발급되는지(활동으로 연장되는지) 기록
+  const s = res.session, d = readJson(SDIAG_FILE, {});
+  if (res.diag && res.diag.revived) log(`목록 읽기가 한 번 실패했다가 첫 화면을 다시 열자 살아남 (HTTP ${res.diag.firstStatus} ${res.diag.firstBody} · ${tokenText(res.diag.session)})`);
+  if (!s || !s.ltpaCreated) return;
+  if (d.ltpaCreated && d.ltpaCreated !== s.ltpaCreated && (!d.tokenLogAt || Date.now() - new Date(d.tokenLogAt) > 60 * 60000)) {
+    log(`로그인 토큰 새로 발급됨: ${hm(s.ltpaCreated)} (이전 발급 ${hm(d.ltpaCreated)}) · 만료 ${hm(s.ltpaExpires)}`); d.tokenLogAt = new Date().toISOString();
+  }
+  d.ltpaCreated = s.ltpaCreated; saveJson(SDIAG_FILE, d);
+}
+
 // ---------- 1) 수집 (토큰 사용 없음) ----------
 async function collect() {
   const resultFile = P("last-result.json"); rm(resultFile);
@@ -169,6 +206,7 @@ async function collect() {
   if (!fs.existsSync(resultFile)) {
     let err = ""; try { err = fs.readFileSync(P("collect.err"), "utf8").trim(); } catch {}
     log(`수집 실패(exit ${code}): ${err.slice(0, 300)}`);
+    if (isNetError(err)) noteNetError(err);
     registerCollectFail("수집 스크립트가 끝나지 않았어요(ego 브라우저가 꺼졌을 수 있어요)");
     return null;
   }
@@ -185,16 +223,19 @@ async function collect() {
         `${when}부터 메일을 가져오지 못하고 있어요. ego 브라우저에서 다시 로그인해 주세요.`, CFG.gwHost.replace(/\/$/, "") + "/");
       saveJson(loginFlag, { since: since.toISOString(), lastNotified: new Date(now).toISOString() });
       log(st ? `로그인 필요 (${min}분째, 다시 알림)` : "로그인 필요");
+      if (!st) logLoginLost(res);
       if (!st) nodeBuild("render"); // 대시보드에 '수집 중단' 배너 표시
     }
     return res;
   }
   if (fs.existsSync(loginFlag)) {
-    const st = readJson(loginFlag, null); rm(loginFlag); log("로그인 복구");
+    const st = readJson(loginFlag, null); rm(loginFlag);
+    log(`로그인 복구${st && st.since ? ` (${Math.round((Date.now() - new Date(st.since)) / 60000)}분 동안 풀려 있었음)` : ""} · ${tokenText(res.session)}`);
     if (st && st.since) notify("그룹웨어 로그인 확인", "밀린 메일을 이어서 가져와요.");
     nodeBuild("render"); // 배너 내리기
   }
-  if (!res.ok) { log(`수집 오류: ${res.message}`); registerCollectFail(res.message); return res; }
+  if (!res.ok) { log(`수집 오류: ${res.message}`); if (isNetError(res.message)) noteNetError(res.message); registerCollectFail(res.message); return res; }
+  trackSession(res);
   clearCollectFail();
   for (const f of res.failed || []) log(`메일 읽기 실패 ${f.tries}회째(다음 실행에 다시 시도): ${f.subject} - ${f.why}`);
   for (const f of res.skipped || []) log(`메일 읽기 계속 실패해 건너뜀: ${f.subject} - ${f.why}`);
@@ -403,6 +444,7 @@ if (lock) {
 touchLock();
 try {
   fs.mkdirSync(FLAGS, { recursive: true });
+  trackRun();
   ensureDashboard();
   const res = argv.includes("--skip-collect") ? { ok: true } : await collect(); // --skip-collect: 시험용(대기열만 요약)
   if (res && res.ok) await summarize();
